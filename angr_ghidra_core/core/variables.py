@@ -41,6 +41,13 @@ class VarSymbol:
     space: int
     offset: int
     size: int
+    # create-index of the representative varnode in <ast>/<varnodes> (identity
+    # key that markup tokens reference via varref)
+    varnode_ref: int = 0
+
+    @property
+    def high_class(self) -> str:
+        return "p" if self.category == 0 else "l"
 
 
 class VariableSymbolTable:
@@ -53,6 +60,7 @@ class VariableSymbolTable:
         self.by_var_id: dict[int, VarSymbol] = {}
         self.symbols: list[VarSymbol] = []
         self._next_id = 0x1001
+        self._next_ref = 0x200  # varnode create-index namespace (distinct from ids)
 
     def build(self, codegen, arch) -> None:
         from angr.sim_variable import SimRegisterVariable, SimStackVariable
@@ -97,6 +105,8 @@ class VariableSymbolTable:
             else:
                 continue  # skip globals/memory vars for now
 
+            sym.varnode_ref = self._next_ref
+            self._next_ref += 1
             self.by_var_id[id(var)] = sym
             self.symbols.append(sym)
 

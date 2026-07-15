@@ -82,13 +82,24 @@ Beyond stage 3 (text-level decompilation through the real protocol):
   cross-validated: the real C++ core consumes the same shape from the oracle's
   `getMappedSymbols` replies.)
 
+- **[done] HighVariables + per-occurrence identity.** The model function now
+  emits an `<ast>` with a representative varnode per variable and a `<highlist>`
+  of HighVariables (`HighLocal`/`HighParam`) linking each varnode (`repref`) to
+  its symbol (`symref`). Variable tokens carry `varref`, so every occurrence of a
+  variable resolves through the same varnode to the same HighVariable to the same
+  symbol — enabling highlight-all-occurrences and per-occurrence rename/retype.
+  (The varnode encoding is the same one `getPcode` uses, so it's cross-validated;
+  the `<ast>`/`<highlist>`/`<high>` *container* decode is matched to Ghidra's
+  `PcodeSyntaxTree.decode` / `decodeHigh` / `HighVariable.decodeInstances` but not
+  yet exercised against a running Ghidra.)
+
 Remaining, in planned order:
 
-1. **P-code AST for slicing.** Emit the `<ast>` (AIL-SSA → p-code
-   varnodes/ops/blocks/edges), `<highlist>`, and per-token `varref`/`opref` links
-   so GUI slicing, per-occurrence variable resolution, and the switch analyzer
-   work. (The decoder treats these as optional today, so the model is valid
-   without them; they're needed for the p-code-graph consumers.)
+1. **P-code op graph for slicing.** The AST currently has varnodes but no basic
+   blocks / p-code ops, so forward/backward slicing (which walks the def-use
+   graph) isn't available yet. Emit `<block>`/`<op>`/`<blockedge>` from angr's
+   AIL and add `opref` links on tokens. This is the largest remaining piece
+   (AIL → p-code triples) and needs validation against a running Ghidra.
 2. **Edit round-trip + types.** Consume DB renames/retypes/prototype overrides
    from callbacks into angr KB overrides; map `getDataType` to `SimType`.
    Nail the exact stack-offset convention (angr bp-relative → Ghidra stack space)

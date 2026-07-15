@@ -25,6 +25,23 @@ class Symbol:
 
 
 @dataclass
+class Varnode:
+    ref: int
+    space: object
+    offset: int
+    size: int
+
+
+@dataclass
+class HighVar:
+    high_class: str
+    symref: int
+    repref: int
+    type_name: str | None
+    members: list[int] = field(default_factory=list)  # varnode refs
+
+
+@dataclass
 class HighFunc:
     name: str
     entry_space: int
@@ -33,10 +50,20 @@ class HighFunc:
     return_type: str | None
     return_storage: tuple | None
     symbols: list[Symbol] = field(default_factory=list)
+    varnodes: list[Varnode] = field(default_factory=list)
+    highs: list[HighVar] = field(default_factory=list)
 
     @property
     def symbols_by_id(self) -> dict[int, Symbol]:
         return {s.sym_id: s for s in self.symbols}
+
+    @property
+    def varnodes_by_ref(self) -> dict[int, Varnode]:
+        return {v.ref: v for v in self.varnodes}
+
+    @property
+    def high_by_repref(self) -> dict[int, HighVar]:
+        return {h.repref: h for h in self.highs}
 
 
 def _addr_tuple(addr_el: Element):
@@ -77,6 +104,29 @@ def decode_high_function(fn: Element) -> HighFunc:
         if symlist is not None:
             for mapsym in symlist.find("mapsym"):
                 hf.symbols.append(_decode_mapsym(mapsym))
+
+    ast = fn.first("ast")
+    if ast is not None:
+        varnodes = ast.first("varnodes")
+        if varnodes is not None:
+            for vn in varnodes.find("addr"):
+                hf.varnodes.append(Varnode(
+                    ref=vn.attr("ref"), space=vn.attr("space"),
+                    offset=vn.attr("offset"), size=vn.attr("size"),
+                ))
+
+    highlist = fn.first("highlist")
+    if highlist is not None:
+        for high in highlist.find("high"):
+            tref = high.first("typeref") or high.first("type")
+            members = [a.attr("ref") for a in high.find("addr") if a.attr("ref") is not None]
+            hf.highs.append(HighVar(
+                high_class=high.attr("class"),
+                symref=high.attr("symref"),
+                repref=high.attr("repref"),
+                type_name=tref.attr("name") if tref else None,
+                members=members,
+            ))
     return hf
 
 
@@ -103,14 +153,14 @@ def _decode_mapsym(mapsym: Element) -> Symbol:
     )
 
 
-def collect_token_symrefs(markup: Element) -> list[int]:
-    """All ATTRIB_SYMREF values appearing on variable tokens in the markup tree."""
+def collect_token_attr(markup: Element, attr: str) -> list[int]:
+    """All values of the given attribute appearing on tokens in the markup tree."""
     out: list[int] = []
 
     def walk(el: Element):
-        sr = el.attr("symref")
-        if sr is not None:
-            out.append(sr)
+        v = el.attr(attr)
+        if v is not None:
+            out.append(v)
         for c in el.children:
             walk(c)
 

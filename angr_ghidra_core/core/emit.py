@@ -92,6 +92,15 @@ class ResponseEmitter:
         enc.close_element(ids.ELEM_SCOPE)
         enc.close_element(ids.ELEM_LOCALDB)
 
+        # <ast> registers a representative varnode per variable (markup tokens
+        # reference these by create-index via varref); <highlist> groups them
+        # into HighVariables linked to their symbols. Both must come after
+        # <localdb> (highlist resolves symrefs against the LocalSymbolMap) and
+        # the varnodes must be registered before the highlist references them.
+        if var_table is not None and var_table.symbols:
+            self._emit_ast(enc, var_table)
+            self._emit_highlist(enc, var_table)
+
         enc.open_element(ids.ELEM_PROTOTYPE)
         enc.write_string(ids.ATTRIB_EXTRAPOP, "unknown")
         enc.write_string(ids.ATTRIB_MODEL, "unknown")
@@ -106,6 +115,49 @@ class ResponseEmitter:
         enc.close_element(ids.ELEM_RETURNSYM)
         enc.close_element(ids.ELEM_PROTOTYPE)
         enc.close_element(ids.ELEM_FUNCTION)
+
+    def _emit_var_storage_addr(self, enc: PackedEncoder, sym, ref: int | None = None) -> None:
+        """Encode a <addr> for a variable's storage, optionally with a varnode ref."""
+        enc.open_element(ids.ELEM_ADDR)
+        if ref is not None:
+            enc.write_unsigned(ids.ATTRIB_REF, ref)
+        if sym.storage_kind == "stack":
+            enc.write_special_space(ids.ATTRIB_SPACE, 0)  # stack special space
+        else:
+            enc.write_space(ids.ATTRIB_SPACE, sym.space)
+        enc.write_unsigned(ids.ATTRIB_OFFSET, sym.offset & 0xFFFFFFFFFFFFFFFF)
+        enc.write_signed(ids.ATTRIB_SIZE, sym.size)
+        enc.close_element(ids.ELEM_ADDR)
+
+    def _emit_ast(self, enc: PackedEncoder, var_table) -> None:
+        """A minimal <ast>: the representative varnodes, no basic blocks.
+        PcodeSyntaxTree.decode accepts an empty/blockless AST (the block loop
+        breaks immediately)."""
+        enc.open_element(ids.ELEM_AST)
+        enc.open_element(ids.ELEM_VARNODES)
+        for sym in var_table.symbols:
+            self._emit_var_storage_addr(enc, sym, ref=sym.varnode_ref)
+        enc.close_element(ids.ELEM_VARNODES)
+        enc.close_element(ids.ELEM_AST)
+
+    def _emit_highlist(self, enc: PackedEncoder, var_table) -> None:
+        """One <high> per variable (HighLocal / HighParam): symref links to the
+        LocalSymbolMap symbol, repref + a member varnode reference the AST
+        varnode, so token varrefs resolve to a HighVariable."""
+        enc.open_element(ids.ELEM_HIGHLIST)
+        for sym in var_table.symbols:
+            enc.open_element(ids.ELEM_HIGH)
+            enc.write_string(ids.ATTRIB_CLASS, sym.high_class)  # 'l' or 'p'
+            enc.write_unsigned(ids.ATTRIB_SYMREF, sym.sym_id)
+            enc.write_unsigned(ids.ATTRIB_REPREF, sym.varnode_ref)
+            # datatype (decodeInstances reads it right after repref)
+            self._typeref(enc, sym.type_name)
+            # member varnode(s): reference the representative by ref
+            enc.open_element(ids.ELEM_ADDR)
+            enc.write_unsigned(ids.ATTRIB_REF, sym.varnode_ref)
+            enc.close_element(ids.ELEM_ADDR)
+            enc.close_element(ids.ELEM_HIGH)
+        enc.close_element(ids.ELEM_HIGHLIST)
 
     def _emit_mapsym(self, enc: PackedEncoder, sym) -> None:
         """One <mapsym>: the <symbol> header+type, then a MappedEntry <addr>/rangelist."""
@@ -122,14 +174,7 @@ class ResponseEmitter:
         enc.close_element(ids.ELEM_SYMBOL)
 
         # MappedEntry: <addr storage><rangelist/>
-        enc.open_element(ids.ELEM_ADDR)
-        if sym.storage_kind == "stack":
-            enc.write_special_space(ids.ATTRIB_SPACE, 0)  # stack special space
-        else:
-            enc.write_space(ids.ATTRIB_SPACE, sym.space)
-        enc.write_unsigned(ids.ATTRIB_OFFSET, sym.offset & 0xFFFFFFFFFFFFFFFF)
-        enc.write_signed(ids.ATTRIB_SIZE, sym.size)
-        enc.close_element(ids.ELEM_ADDR)
+        self._emit_var_storage_addr(enc, sym)
         enc.open_element(ids.ELEM_RANGELIST)
         enc.close_element(ids.ELEM_RANGELIST)
         enc.close_element(ids.ELEM_MAPSYM)
@@ -144,9 +189,11 @@ class ResponseEmitter:
             if not text:
                 continue
             color = _color_for(obj)
-            symref = None
+            varref = None
             if type(obj).__name__ == "CVariable" and var_table is not None:
-                symref = var_table.symref_for(obj.variable)
+                sym = var_table.by_var_id.get(id(obj.variable))
+                if sym is not None:
+                    varref = sym.varnode_ref
             segments = text.split("\n")
             for i, seg in enumerate(segments):
                 if i > 0:
@@ -158,16 +205,16 @@ class ResponseEmitter:
                     seg = stripped
                 if not seg:
                     continue
-                self._emit_token(enc, seg, color, symref)
+                self._emit_token(enc, seg, color, varref)
         enc.close_element(ids.ELEM_FUNCTION)
 
     def _emit_token(self, enc: PackedEncoder, text: str, color: int | None,
-                    symref: int | None = None) -> None:
+                    varref: int | None = None) -> None:
         if color == VARIABLE_COLOR:
             enc.open_element(ids.ELEM_VARIABLE)
             enc.write_signed(ids.ATTRIB_COLOR, color)
-            if symref is not None:
-                enc.write_unsigned(ids.ATTRIB_SYMREF, symref)
+            if varref is not None:
+                enc.write_unsigned(ids.ATTRIB_VARREF, varref)
             enc.write_string(ids.ATTRIB_CONTENT, text)
             enc.close_element(ids.ELEM_VARIABLE)
         elif color == FUNCTION_COLOR:

@@ -72,7 +72,6 @@ class DecompResult:
         from ..ghidra_wire.highfunc import decode_high_function
         return decode_high_function(self.model) if self.model is not None else None
 
-    @property
-    def token_symrefs(self):
-        from ..ghidra_wire.highfunc import collect_token_symrefs
-        return collect_token_symrefs(self.markup) if self.markup is not None else []
+    def token_attr(self, attr: str):
+        from ..ghidra_wire.highfunc import collect_token_attr
+        return collect_token_attr(self.markup, attr) if self.markup is not None else []

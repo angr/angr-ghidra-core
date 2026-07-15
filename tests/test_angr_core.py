@@ -65,35 +65,65 @@ def test_angr_core_second_function(angr_session):
     assert res.markup is not None
 
 
-def test_localdb_symbols_and_symref_integrity(angr_session):
-    """The model function carries a LocalSymbolMap of named symbols with storage,
-    and every variable-token symref resolves to one of them."""
+def test_localdb_symbols(angr_session):
+    """The model function carries a LocalSymbolMap of named symbols with storage."""
     res = angr_session.decompile("main")
     hf = res.high_function
     assert hf.name == "main"
     assert len(hf.symbols) >= 5, "expected several local/param symbols"
 
-    # every symbol has an id, a name, a type, and a storage location
     for s in hf.symbols:
         assert s.sym_id and s.sym_id != 0
         assert s.name
         assert s.type_name is not None
         assert s.storage_offset is not None and s.storage_size
 
-    # symbol ids are unique
     ids_ = [s.sym_id for s in hf.symbols]
     assert len(ids_) == len(set(ids_))
 
-    # at least one parameter (category 0) and one local (category -1)
     cats = {s.category for s in hf.symbols}
     assert 0 in cats and -1 in cats
 
-    # every token symref points at a real symbol
-    valid = hf.symbols_by_id
-    refs = res.token_symrefs
-    assert refs, "expected variable tokens to carry symref links"
+
+def test_ast_highlist_and_varref_chain(angr_session):
+    """Every variable token's varref resolves through the AST varnode and a
+    HighVariable to a LocalSymbolMap symbol, and all occurrences of a variable
+    share one varref (per-occurrence identity)."""
+    res = angr_session.decompile("main")
+    hf = res.high_function
+
+    # one representative varnode + one HighVariable per symbol
+    assert len(hf.varnodes) == len(hf.symbols)
+    assert len(hf.highs) == len(hf.symbols)
+
+    vn_by_ref = hf.varnodes_by_ref
+    sym_by_id = hf.symbols_by_id
+
+    # each high: repref is a real varnode, symref is a real symbol, class l/p
+    for h in hf.highs:
+        assert h.high_class in ("l", "p")
+        assert h.repref in vn_by_ref, "high repref has no varnode"
+        assert h.symref in sym_by_id, "high symref has no symbol"
+        assert h.repref in h.members
+
+    # params get class 'p', locals get class 'l'
+    for h in hf.highs:
+        sym = sym_by_id[h.symref]
+        assert h.high_class == ("p" if sym.category == 0 else "l")
+
+    # every variable-token varref -> varnode -> high -> symbol
+    high_by_repref = hf.high_by_repref
+    refs = res.token_attr("varref")
+    assert refs, "expected variable tokens to carry varref links"
     for r in refs:
-        assert r in valid, f"symref {r} has no matching symbol"
+        assert r in vn_by_ref, f"varref {r} has no varnode"
+        assert r in high_by_repref, f"varnode {r} has no HighVariable"
+        assert high_by_repref[r].symref in sym_by_id
+
+    # per-occurrence identity: a variable used N>1 times shares one varref
+    from collections import Counter
+    counts = Counter(refs)
+    assert any(c > 1 for c in counts.values()), "expected a variable used more than once"
 
 
 def test_return_storage_is_valid(angr_session):
