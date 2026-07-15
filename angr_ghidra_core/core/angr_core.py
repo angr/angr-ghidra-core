@@ -144,6 +144,16 @@ class AngrCore:
                     return fn.attr("name", f"func_{entry:x}"), fn.attr("size")
         return f"func_{entry:x}", None
 
+    def _query_code_label(self, addr: int) -> str:
+        enc = PackedEncoder()
+        enc.open_element(ids.ELEM_COMMAND_GETCODELABEL)
+        encode_addr(enc, Addr(self.spec.space_ram, addr))
+        enc.close_element(ids.ELEM_COMMAND_GETCODELABEL)
+        kind, payload = self.t.query(enc)
+        if kind == "string" and payload:
+            return payload.decode("utf-8")
+        return ""
+
     def _fetch_bytes(self, entry: int, size: int) -> bytes:
         """Fetch the function body via getBytes. Trims trailing unreadable bytes."""
         enc = PackedEncoder()
@@ -182,10 +192,42 @@ class AngrCore:
         if func is None:
             func = proj.kb.functions.function(addr=entry, create=True)
         func.name = name
+        self._name_call_targets(proj, func, entry, len(code))
         dec = proj.analyses.Decompiler(func, cfg=cfg.model)
         if dec.codegen is None:
             raise RuntimeError(f"angr produced no code for {name} @ {entry:#x}")
         return dec.codegen
+
+    def _name_call_targets(self, proj, func, entry: int, size: int) -> None:
+        """Resolve each call target's name from Ghidra (getCodeLabel) and create a
+        named, returning function stub in angr's KB so calls render with names
+        instead of raw addresses. Targets are found by scanning the function's
+        call instructions (they lie outside the scoped blob, so the CFG doesn't
+        register them itself)."""
+        targets: set[int] = set()
+        for block in func.blocks:
+            try:
+                insns = block.capstone.insns
+            except Exception:
+                continue
+            for ins in insns:
+                if ins.mnemonic == "call":
+                    try:
+                        targets.add(int(ins.op_str, 16))
+                    except ValueError:
+                        pass  # indirect call
+        for tgt in targets:
+            if tgt == entry:
+                continue
+            try:
+                label = self._query_code_label(tgt)
+            except Exception:
+                label = ""
+            name = label or f"sub_{tgt:x}"
+            stub = proj.kb.functions.function(addr=tgt, name=name, create=True)
+            # external stubs have no body; assume they return so the decompiler
+            # emits normal call statements (not "/* do not return */")
+            stub.returning = True
 
 
 def main() -> None:

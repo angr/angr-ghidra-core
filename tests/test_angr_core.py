@@ -35,6 +35,19 @@ def test_angr_core_decompiles_main(angr_session):
     assert text.count("\n") >= 6
 
 
+def test_angr_core_resolves_call_names(angr_session):
+    """Call targets are named from Ghidra's symbol table (getCodeLabel), not left
+    as raw addresses."""
+    text = angr_session.decompile("main").c
+    assert "authenticate(" in text
+    assert "accepted(" in text and "rejected(" in text
+    # PLT stubs resolved via the import table
+    assert "read(" in text or "puts(" in text
+    # no bare hex-address calls remain
+    import re
+    assert not re.search(r"\b\d{7,}\(", text), f"unresolved numeric call in:\n{text}"
+
+
 def test_angr_core_model_is_high_function_shaped(angr_session):
     res = angr_session.decompile("main")
     fn = res.model

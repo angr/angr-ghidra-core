@@ -131,6 +131,16 @@ class PypcodeOracle:
                 )
                 next_id += 1
 
+        # a broader address->name map for label queries: real functions, PLT
+        # stubs (imports), and any named symbol. Mirrors what Ghidra's symbol
+        # table would answer for getCodeLabel / getMappedSymbols.
+        self.labels: dict[int, str] = {f.addr: f.name for f in self.functions.values()}
+        for addr, name in getattr(mo, "reverse_plt", {}).items():
+            self.labels.setdefault(addr, name)
+        for sym in mo.symbols:
+            if sym.name and sym.rebased_addr:
+                self.labels.setdefault(sym.rebased_addr, sym.name)
+
     def add_function(self, addr: int, name: str, size: int) -> None:
         self.functions[addr] = Function(addr, name, size, 0x10000 + len(self.functions))
 
@@ -438,8 +448,7 @@ class PypcodeOracle:
 
     def query_getcodelabel(self, dec: PackedDecoder):
         addr, _ = decode_addr(dec)
-        func = self.functions.get(addr.offset)
-        name = func.name if func else ""
+        name = self.labels.get(addr.offset, "")
         self.trace("oracle", "getcodelabel", (addr, name))
         return name
 
