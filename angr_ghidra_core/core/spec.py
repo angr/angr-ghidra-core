@@ -24,6 +24,7 @@ class SpecInfo:
     bigendian: bool
     return_register_name: str
     angr_arch: object
+    coretype_ids: dict  # name -> id, parsed from the coretypes document
 
 
 def _space_index(root: ET.Element, name: str) -> int | None:
@@ -54,6 +55,7 @@ def parse_specs(pspec: str, cspec: str, tspec: str, coretypes: str) -> SpecInfo:
 
     angr_arch = _resolve_arch(pspec, bigendian, bits)
     ret_name = _return_register_name(cspec)
+    coretype_ids = _parse_coretypes(coretypes)
 
     return SpecInfo(
         space_ram=space_ram if space_ram is not None else 2,
@@ -62,7 +64,21 @@ def parse_specs(pspec: str, cspec: str, tspec: str, coretypes: str) -> SpecInfo:
         bigendian=bigendian,
         return_register_name=ret_name,
         angr_arch=angr_arch,
+        coretype_ids=coretype_ids,
     )
+
+
+def _parse_coretypes(coretypes: str) -> dict:
+    ids: dict[str, int] = {}
+    try:
+        root = ET.fromstring(coretypes)
+    except ET.ParseError:
+        return ids
+    for t in root.iter("type"):
+        name, tid = t.get("name"), t.get("id")
+        if name and tid is not None:
+            ids[name] = int(tid, 0)
+    return ids
 
 
 def _resolve_arch(pspec: str, bigendian: bool, bits: int):
@@ -78,19 +94,23 @@ def _resolve_arch(pspec: str, bigendian: bool, bits: int):
 
 
 def _return_register_name(cspec: str) -> str:
-    """The canonical Ghidra register name for the default return value, from the
-    cspec's default prototype <output>. Resolved to storage later via getRegister."""
+    """The canonical Ghidra register name for the default (integer) return value,
+    from the cspec's default prototype <output>. Prefers the first non-float
+    pentry (integer returns) over float registers. Resolved to storage later via
+    getRegister."""
     try:
         croot = ET.fromstring(cspec)
     except ET.ParseError:
         return "RAX"
+    fallback = None
     for proto in croot.iter("default_proto"):
         for out in proto.iter("output"):
-            for reg in out.iter("register"):
-                if reg.get("name"):
-                    return reg.get("name")
             for pentry in out.iter("pentry"):
-                for reg in pentry.iter("register"):
-                    if reg.get("name"):
-                        return reg.get("name")
-    return "RAX"
+                reg = pentry.find("register")
+                if reg is None or not reg.get("name"):
+                    continue
+                if fallback is None:
+                    fallback = reg.get("name")
+                if pentry.get("metatype") != "float":
+                    return reg.get("name")
+    return fallback or "RAX"

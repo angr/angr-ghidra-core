@@ -19,6 +19,7 @@ from ..ghidra_wire.packed import PackedDecoder, PackedEncoder
 from ..ghidra_wire.server import ServerTransport
 from .emit import ResponseEmitter
 from .spec import SpecInfo, parse_specs
+from .variables import VariableSymbolTable
 
 log = logging.getLogger("angr_ghidra_core")
 
@@ -75,7 +76,8 @@ class AngrCore:
         # offset matches Ghidra's register-space convention exactly
         off, size = self._query_register(self.spec.return_register_name)
         self.emitter = ResponseEmitter(
-            self.spec.space_ram, self.spec.space_register, (off, size)
+            self.spec.space_ram, self.spec.space_register, (off, size),
+            self.spec.coretype_ids,
         )
 
     def cmd_deregisterProgram(self, params: list[bytes]):
@@ -109,8 +111,10 @@ class AngrCore:
         if size is None or size <= 0:
             size = 0x200  # fall back to a fixed window if the symbol has no size
         code = self._fetch_bytes(entry, size)
-        codegen = self._decompile(entry, name, code)
-        return self.emitter.emit_doc(name, entry, len(code), codegen)
+        codegen, arch = self._decompile(entry, name, code)
+        var_table = VariableSymbolTable(self._query_register, self.spec.space_register)
+        var_table.build(codegen, arch)
+        return self.emitter.emit_doc(name, entry, len(code), codegen, var_table)
 
     # ------------------------------------------------------- Ghidra queries
 
@@ -196,7 +200,7 @@ class AngrCore:
         dec = proj.analyses.Decompiler(func, cfg=cfg.model)
         if dec.codegen is None:
             raise RuntimeError(f"angr produced no code for {name} @ {entry:#x}")
-        return dec.codegen
+        return dec.codegen, proj.arch
 
     def _name_call_targets(self, proj, func, entry: int, size: int) -> None:
         """Resolve each call target's name from Ghidra (getCodeLabel) and create a

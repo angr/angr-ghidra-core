@@ -65,6 +65,46 @@ def test_angr_core_second_function(angr_session):
     assert res.markup is not None
 
 
+def test_localdb_symbols_and_symref_integrity(angr_session):
+    """The model function carries a LocalSymbolMap of named symbols with storage,
+    and every variable-token symref resolves to one of them."""
+    res = angr_session.decompile("main")
+    hf = res.high_function
+    assert hf.name == "main"
+    assert len(hf.symbols) >= 5, "expected several local/param symbols"
+
+    # every symbol has an id, a name, a type, and a storage location
+    for s in hf.symbols:
+        assert s.sym_id and s.sym_id != 0
+        assert s.name
+        assert s.type_name is not None
+        assert s.storage_offset is not None and s.storage_size
+
+    # symbol ids are unique
+    ids_ = [s.sym_id for s in hf.symbols]
+    assert len(ids_) == len(set(ids_))
+
+    # at least one parameter (category 0) and one local (category -1)
+    cats = {s.category for s in hf.symbols}
+    assert 0 in cats and -1 in cats
+
+    # every token symref points at a real symbol
+    valid = hf.symbols_by_id
+    refs = res.token_symrefs
+    assert refs, "expected variable tokens to carry symref links"
+    for r in refs:
+        assert r in valid, f"symref {r} has no matching symbol"
+
+
+def test_return_storage_is_valid(angr_session):
+    res = angr_session.decompile("main")
+    hf = res.high_function
+    # returnsym must carry storage the core accepts (register space, real offset)
+    assert hf.return_storage is not None
+    space, off, _size = hf.return_storage
+    assert space is not None and off is not None
+
+
 def test_both_cores_agree_on_structure():
     """Both cores, given the same bytes, should recover a function with the same
     entry, a branch, and calls — even though the exact C text differs."""

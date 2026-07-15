@@ -69,20 +69,33 @@ original core at any time.
 
 ## Status and roadmap
 
-This is the **stage-3** milestone: text-level decompilation rendered through the
-real protocol. Known gaps, in planned order:
+Beyond stage 3 (text-level decompilation through the real protocol):
 
-1. **Symbol names for calls.** Call targets currently render as raw addresses
-   because the scoped angr project doesn't yet consume Ghidra's `getExternalRef` /
-   `getCodeLabel` / `getMappedSymbols` names. Wire these into the angr KB.
-2. **Full HighFunction fidelity.** Emit the `<ast>` (AIL-SSA → p-code
+- **[done] Symbol names for calls.** Call targets are resolved to names via a
+  `getCodeLabel` callback and registered as named, returning stubs in angr's KB,
+  so calls render as `puts()` / `authenticate()` etc. instead of raw addresses.
+- **[done] Local-variable symbols + token links.** The model function now carries
+  a real `<localdb>` `LocalSymbolMap`: one HighSymbol per angr variable with a
+  stable id, name, core datatype, and storage (stack special-space offset or a
+  register-space address resolved via `getRegister`). Variable tokens carry
+  `symref` links to those symbols. (The `<symbol>`/`<mapsym>`/`<addr>` encoding is
+  cross-validated: the real C++ core consumes the same shape from the oracle's
+  `getMappedSymbols` replies.)
+
+Remaining, in planned order:
+
+1. **P-code AST for slicing.** Emit the `<ast>` (AIL-SSA → p-code
    varnodes/ops/blocks/edges), `<highlist>`, and per-token `varref`/`opref` links
-   so GUI slicing, variable rename/retype, and the switch analyzer work.
-3. **Edit round-trip + types.** Consume DB renames/retypes/prototype overrides
+   so GUI slicing, per-occurrence variable resolution, and the switch analyzer
+   work. (The decoder treats these as optional today, so the model is valid
+   without them; they're needed for the p-code-graph consumers.)
+2. **Edit round-trip + types.** Consume DB renames/retypes/prototype overrides
    from callbacks into angr KB overrides; map `getDataType` to `SimType`.
-4. **Coverage + hybrid routing.** `normalize`/`paramid` styles, `generateSignatures`
+   Nail the exact stack-offset convention (angr bp-relative → Ghidra stack space)
+   so rename/retype write-back targets the right variable.
+3. **Coverage + hybrid routing.** `normalize`/`paramid` styles, `generateSignatures`
    and `structureGraph` routed to the C++ core; option plumbing; performance.
-5. **Scale validation** against the C++ core across a large corpus.
+4. **Scale validation** against the C++ core across a large corpus.
 
 ## Layout
 
