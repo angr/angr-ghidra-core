@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Drop-in shim for Ghidra's native `decompile` binary.
+#
+# Ghidra resolves and spawns an executable literally named `decompile` (no args)
+# from its per-OS support directory and speaks the decompiler protocol over
+# stdin/stdout. To use the angr-backed core instead of the C++ one:
+#
+#   1. Build/locate your Ghidra install's os/<platform>/ directory, e.g.
+#        <ghidra>/Ghidra/Features/Decompiler/os/linux_x86_64/
+#   2. Back up the stock binary:  mv decompile decompile.orig
+#   3. Symlink this shim there:   ln -s .../angr-ghidra-core/bin/decompile decompile
+#
+# Environment:
+#   ANGR_GHIDRA_PYTHON   python interpreter with angr installed
+#                        (default: /workspace/angr-venv/bin/python)
+#   ANGR_GHIDRA_CORE     path to the angr core entry point
+#                        (default: alongside this script)
+#   ANGR_GHIDRA_FALLBACK if set to a path, exec that stock binary instead
+#                        (escape hatch to restore original behavior)
+set -euo pipefail
+
+if [[ -n "${ANGR_GHIDRA_FALLBACK:-}" ]]; then
+    exec "$ANGR_GHIDRA_FALLBACK" "$@"
+fi
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="${ANGR_GHIDRA_PYTHON:-/workspace/angr-venv/bin/python}"
+CORE="${ANGR_GHIDRA_CORE:-$HERE/angr-decompile}"
+
+exec "$PYTHON" "$CORE" "$@"

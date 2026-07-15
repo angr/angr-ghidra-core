@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Executable entry point for the angr-backed decompiler core.
+
+Drop-in replacement for Ghidra's native `decompile` binary: reads the decompiler
+protocol on stdin/stdout. Ghidra spawns this with no arguments.
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from angr_ghidra_core.core.angr_core import main
+
+if __name__ == "__main__":
+    main()

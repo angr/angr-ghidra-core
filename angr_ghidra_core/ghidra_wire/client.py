@@ -44,11 +44,14 @@ class CoreException(Exception):
 class DecompClient:
     """Drive one decompiler core process."""
 
-    def __init__(self, exe_path: str, oracle, trace=None):
-        """oracle: object with query_<name>(decoder) -> reply methods (see _dispatch).
+    def __init__(self, exe_path, oracle, trace=None):
+        """exe_path: path to the core binary, or a list (argv) for a wrapped core
+        (e.g. ["python", "bin/angr-decompile"]).
+        oracle: object with query_<name>(decoder) -> reply methods.
         trace: optional callable(direction: str, kind: str, payload) for logging."""
+        argv = [exe_path] if isinstance(exe_path, str) else list(exe_path)
         self.proc = subprocess.Popen(
-            [exe_path],
+            argv,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
