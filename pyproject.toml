@@ -1,0 +1,23 @@
+[project]
+name = "angr-ghidra-core"
+version = "0.1.0"
+description = "angr decompiler as a drop-in replacement for Ghidra's C++ decompiler core"
+requires-python = ">=3.10"
+dependencies = [
+    "angr",
+    "pypcode>=3.0",
+    "cle",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-xdist"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["angr_ghidra_core*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
