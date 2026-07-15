@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Validate the angr-backed core against the REAL Ghidra Java decoders, headless.
 #
-# Builds nothing; assumes a Ghidra dist at $GHIDRA_DIST with the angr shim
-# installed as its Decompiler `decompile` binary (see README "Ghidra testing").
+# Builds nothing; assumes a Ghidra dist at $GHIDRA_DIST with the angr launcher
+# (launcher/target/release/decompile) installed as its Decompiler `decompile`
+# binary (see README "Ghidra testing").
 #
 # Usage: scripts/run_ghidra_validation.sh [binary] [function]
 set -euo pipefail

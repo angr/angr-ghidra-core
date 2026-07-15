@@ -1,0 +1,18 @@
+[package]
+name = "angr-decompile-launcher"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform launcher that lets the angr decompiler core impersonate Ghidra's native `decompile` binary"
+license = "BSD-2-Clause"
+
+# The produced binary is named `decompile` (or `decompile.exe` on Windows) so it
+# can be dropped directly into Ghidra's Decompiler os/<platform>/ directory.
+[[bin]]
+name = "decompile"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"

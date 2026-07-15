@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 *.egg-info/
+
+# Rust launcher build output
+launcher/target/

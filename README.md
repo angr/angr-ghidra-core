@@ -54,10 +54,12 @@ cd /workspace/ghidra
 JAVA_HOME=/workspace/jdk ./gradlew -I gradle/support/fetchDependencies.gradle
 JAVA_HOME=/workspace/jdk ./gradlew buildGhidra   # staged dir usable even if the
                                                  # final SBOM/zip step fails
-# 2. install the shim as the dist's decompile binary (fallback -> real ghidra_opt)
+# 2. build + install the launcher as the dist's decompile binary
+#    (keep the real ghidra_opt around as an ANGR_GHIDRA_FALLBACK escape hatch)
+(cd /workspace/angr-ghidra-core/launcher && cargo build --release)
 OS=build/dist/ghidra_12.2_DEV/Ghidra/Features/Decompiler/os/linux_x86_64
 cp <ghidra_opt> $OS/ghidra_opt_real
-cp /workspace/angr-ghidra-core/bin/decompile $OS/decompile
+cp /workspace/angr-ghidra-core/launcher/target/release/decompile $OS/decompile
 # 3. run the headless validation
 /workspace/angr-ghidra-core/scripts/run_ghidra_validation.sh
 ```
@@ -88,10 +90,31 @@ unsigned int main(unsigned int a0, unsigned long long a1)
 
 ## Installing into a Ghidra tree
 
-`bin/decompile` is a shim you can drop in place of Ghidra's native binary
-(`<ghidra>/Ghidra/Features/Decompiler/os/<platform>/decompile`). See the header of
-that script. Set `ANGR_GHIDRA_FALLBACK` to the stock binary path to restore the
-original core at any time.
+Ghidra spawns an executable literally named `decompile` (`decompile.exe` on
+Windows) from `<ghidra>/Ghidra/Features/Decompiler/os/<platform>/`. The
+**`launcher/`** crate builds a small, zero-dependency native binary that stands in
+for it: it locates a Python interpreter and the angr core, then hands over the
+process's stdio transparently (a real `exec` on Unix; spawn-and-wait on Windows),
+so the Python core speaks the protocol to Ghidra directly. A native launcher —
+rather than a shell script — is what makes the same drop-in work on Windows.
+
+```bash
+cd launcher
+cargo build --release                       # -> target/release/decompile
+# Windows (from a Windows box, or Linux with a mingw/MSVC cross toolchain):
+#   cargo build --release --target x86_64-pc-windows-gnu    # -> decompile.exe
+#   cargo build --release --target x86_64-pc-windows-msvc
+cp target/release/decompile \
+   <ghidra>/Ghidra/Features/Decompiler/os/linux_x86_64/decompile
+```
+
+The launcher honours these environment variables:
+
+| Variable | Meaning |
+|---|---|
+| `ANGR_GHIDRA_PYTHON` | Python interpreter to use (default: search `PATH`) |
+| `ANGR_GHIDRA_CORE` | Path to the angr core entry (default: `angr-decompile` next to the binary, else `python -m angr_ghidra_core.core.angr_core`) |
+| `ANGR_GHIDRA_FALLBACK` | If set, exec this stock `decompile` binary instead — an escape hatch to restore the original C++ core |
 
 ## Status and roadmap
 
@@ -140,10 +163,12 @@ angr_ghidra_core/
   harness/       PypcodeOracle, DecompSession (drive either core from a binary)
   core/          angr-backed core: spec parsing, response emission, main loop
 bin/
-  angr-decompile the angr core entry point
-  decompile      shim for dropping into a Ghidra install
-scripts/         gen_id_tables.py, decompile.py, drive_real_core.py
-tests/           packed unit tests + real-core and angr-core integration tests
+  angr-decompile   the angr core entry point (python)
+launcher/          zero-dep Rust crate -> native `decompile`/`decompile.exe`
+ghidra_validation/ headless GhidraScript validating the decode contract
+scripts/           gen_id_tables.py, decompile.py, drive_real_core.py,
+                   run_ghidra_validation.sh
+tests/             packed unit tests + real-core and angr-core integration tests
 ```
 
 ## Requirements
