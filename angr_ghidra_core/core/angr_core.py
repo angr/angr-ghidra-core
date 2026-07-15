@@ -7,6 +7,7 @@ returns a decompileAt <doc> response.
 
 from __future__ import annotations
 
+import os
 import io
 import logging
 import sys
@@ -65,6 +66,12 @@ class AngrCore:
 
     def cmd_registerProgram(self, params: list[bytes]) -> str:
         pspec, cspec, tspec, coretypes = (p.decode("utf-8") for p in params[:4])
+        dump = os.environ.get("ANGR_DUMP_SPECS")
+        if dump:
+            for nm, txt in (("pspec", pspec), ("cspec", cspec), ("tspec", tspec),
+                            ("coretypes", coretypes)):
+                with open(f"{dump}.{nm}", "w") as fh:
+                    fh.write(txt)
         self.spec = parse_specs(pspec, cspec, tspec, coretypes)
         self.emitter = None
         return str(self.arch_id)
@@ -107,14 +114,21 @@ class AngrCore:
         dec.close_element_skipping(el)
 
         self._ensure_emitter()
-        name, size = self._query_function(entry)
-        if size is None or size <= 0:
-            size = 0x200  # fall back to a fixed window if the symbol has no size
-        code = self._fetch_bytes(entry, size)
-        codegen, arch = self._decompile(entry, name, code)
+        name, _size = self._query_function(entry)
+        # NOTE: the getMappedSymbols size is the symbol's storage size (e.g. a
+        # pointer width), NOT the function's code length -- the real core never
+        # needs the length because it follows p-code flow. So fetch a generous
+        # readable window and let angr's CFG find the function's real extent.
+        code = self._fetch_window(entry)
+        codegen, arch, func_size = self._decompile(entry, name, code)
         var_table = VariableSymbolTable(self._query_register, self.spec.space_register)
         var_table.build(codegen, arch)
-        return self.emitter.emit_doc(name, entry, len(code), codegen, var_table)
+        doc = self.emitter.emit_doc(name, entry, func_size, codegen, var_table)
+        dump = os.environ.get("ANGR_DUMP_RESPONSE")
+        if dump:
+            with open(dump, "wb") as fh:
+                fh.write(doc)
+        return doc
 
     # ------------------------------------------------------- Ghidra queries
 
@@ -158,20 +172,47 @@ class AngrCore:
             return payload.decode("utf-8")
         return ""
 
-    def _fetch_bytes(self, entry: int, size: int) -> bytes:
-        """Fetch the function body via getBytes. Trims trailing unreadable bytes."""
+    WINDOW = 0x2000       # max bytes to pull for one function
+    CHUNK = 0x100         # granularity for probing readable extent
+
+    def _get_bytes(self, addr: int, size: int) -> bytes | None:
+        """One getBytes callback. Ghidra returns null (empty) if any byte in the
+        range is unreadable."""
         enc = PackedEncoder()
         enc.open_element(ids.ELEM_COMMAND_GETBYTES)
         enc.open_element(ids.ELEM_ADDR)
         enc.write_space(ids.ATTRIB_SPACE, self.spec.space_ram)
-        enc.write_unsigned(ids.ATTRIB_OFFSET, entry)
+        enc.write_unsigned(ids.ATTRIB_OFFSET, addr)
         enc.write_signed(ids.ATTRIB_SIZE, size)
         enc.close_element(ids.ELEM_ADDR)
         enc.close_element(ids.ELEM_COMMAND_GETBYTES)
         kind, payload = self.t.query(enc)
         if kind != "bytes" or not payload:
-            raise RuntimeError(f"getBytes returned no data at {entry:#x}")
+            return None
         return payload
+
+    def _fetch_window(self, entry: int) -> bytes:
+        """Fetch a readable window starting at entry, chunk by chunk, stopping at
+        the first unreadable chunk (Ghidra fails the whole range if any byte is
+        unmapped). Returns at least one chunk or raises."""
+        out = bytearray()
+        addr = entry
+        while len(out) < self.WINDOW:
+            chunk = self._get_bytes(addr, self.CHUNK)
+            if chunk is None:
+                break
+            out.extend(chunk)
+            addr += len(chunk)
+            if len(chunk) < self.CHUNK:
+                break
+        if not out:
+            # last resort: try successively smaller reads at the entry
+            for sz in (0x80, 0x40, 0x10, 0x8, 0x1):
+                chunk = self._get_bytes(entry, sz)
+                if chunk:
+                    return bytes(chunk)
+            raise RuntimeError(f"getBytes returned no data at {entry:#x}")
+        return bytes(out)
 
     # ------------------------------------------------------------ angr run
 
@@ -200,7 +241,8 @@ class AngrCore:
         dec = proj.analyses.Decompiler(func, cfg=cfg.model)
         if dec.codegen is None:
             raise RuntimeError(f"angr produced no code for {name} @ {entry:#x}")
-        return dec.codegen, proj.arch
+        func_size = func.size or len(code)
+        return dec.codegen, proj.arch, func_size
 
     def _name_call_targets(self, proj, func, entry: int, size: int) -> None:
         """Resolve each call target's name from Ghidra (getCodeLabel) and create a

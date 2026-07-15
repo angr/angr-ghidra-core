@@ -36,6 +36,32 @@ and backs the `decompile` command with `angr.analyses.Decompiler`.
 Both the genuine C++ core (`ghidra_opt`) and the angr core decompile the same
 binary through the identical harness — see `tests/`.
 
+**Validated against real Ghidra.** The angr core has been driven by an actual
+headless Ghidra 12.2 (`analyzeHeadless` → `DecompInterface` → our shim). Ghidra's
+own Java decoders accept the response: a non-null `HighFunction` with a 7-symbol
+`LocalSymbolMap` (2 params + 5 locals), a `FunctionPrototype`, rendered C, and
+every variable token resolving through `varref → varnode → HighVariable →
+HighSymbol` (per-occurrence identity; rename targets resolve). See
+`ghidra_validation/ValidateAngrCore.java` and `scripts/run_ghidra_validation.sh`.
+
+### Ghidra testing
+
+Needs a JDK 25 and a built Ghidra dist:
+
+```bash
+# 1. JDK 25 (Temurin) into /workspace/jdk, then build Ghidra's staged dist
+cd /workspace/ghidra
+JAVA_HOME=/workspace/jdk ./gradlew -I gradle/support/fetchDependencies.gradle
+JAVA_HOME=/workspace/jdk ./gradlew buildGhidra   # staged dir usable even if the
+                                                 # final SBOM/zip step fails
+# 2. install the shim as the dist's decompile binary (fallback -> real ghidra_opt)
+OS=build/dist/ghidra_12.2_DEV/Ghidra/Features/Decompiler/os/linux_x86_64
+cp <ghidra_opt> $OS/ghidra_opt_real
+cp /workspace/angr-ghidra-core/bin/decompile $OS/decompile
+# 3. run the headless validation
+/workspace/angr-ghidra-core/scripts/run_ghidra_validation.sh
+```
+
 ## Quick start
 
 ```bash
@@ -88,10 +114,8 @@ Beyond stage 3 (text-level decompilation through the real protocol):
   its symbol (`symref`). Variable tokens carry `varref`, so every occurrence of a
   variable resolves through the same varnode to the same HighVariable to the same
   symbol — enabling highlight-all-occurrences and per-occurrence rename/retype.
-  (The varnode encoding is the same one `getPcode` uses, so it's cross-validated;
-  the `<ast>`/`<highlist>`/`<high>` *container* decode is matched to Ghidra's
-  `PcodeSyntaxTree.decode` / `decodeHigh` / `HighVariable.decodeInstances` but not
-  yet exercised against a running Ghidra.)
+  The whole chain is now confirmed end-to-end against a running headless Ghidra
+  (see "Validated against real Ghidra" above).
 
 Remaining, in planned order:
 

@@ -55,6 +55,13 @@ class ResponseEmitter:
         return enc.to_bytes()
 
     def _typeref(self, enc: PackedEncoder, name: str) -> None:
+        # a typeref must resolve against the registered core types; if the name
+        # isn't present, fall back to one that is (undefined8, then any).
+        if name not in self.coretype_ids:
+            if "undefined8" in self.coretype_ids:
+                name = "undefined8"
+            elif self.coretype_ids:
+                name = next(iter(self.coretype_ids))
         enc.open_element(ids.ELEM_TYPEREF)
         enc.write_string(ids.ATTRIB_NAME, name)
         tid = self.coretype_ids.get(name)
@@ -79,6 +86,7 @@ class ResponseEmitter:
         enc.write_special_space(ids.ATTRIB_MAIN, 0)  # stack
         enc.open_element(ids.ELEM_SCOPE)
         enc.write_string(ids.ATTRIB_NAME, name)
+        enc.write_unsigned(ids.ATTRIB_ID, 1)  # function scope id (non-global)
         enc.open_element(ids.ELEM_PARENT)
         enc.write_unsigned(ids.ATTRIB_ID, 0)
         enc.close_element(ids.ELEM_PARENT)
@@ -212,19 +220,19 @@ class ResponseEmitter:
                     varref: int | None = None) -> None:
         if color == VARIABLE_COLOR:
             enc.open_element(ids.ELEM_VARIABLE)
-            enc.write_signed(ids.ATTRIB_COLOR, color)
+            enc.write_unsigned(ids.ATTRIB_COLOR, color)
             if varref is not None:
                 enc.write_unsigned(ids.ATTRIB_VARREF, varref)
             enc.write_string(ids.ATTRIB_CONTENT, text)
             enc.close_element(ids.ELEM_VARIABLE)
         elif color == FUNCTION_COLOR:
             enc.open_element(ids.ELEM_FUNCNAME)
-            enc.write_signed(ids.ATTRIB_COLOR, color)
+            enc.write_unsigned(ids.ATTRIB_COLOR, color)
             enc.write_string(ids.ATTRIB_CONTENT, text)
             enc.close_element(ids.ELEM_FUNCNAME)
         elif color == TYPE_COLOR:
             enc.open_element(ids.ELEM_TYPE)
-            enc.write_signed(ids.ATTRIB_COLOR, color)
+            enc.write_unsigned(ids.ATTRIB_COLOR, color)
             enc.write_string(ids.ATTRIB_CONTENT, text)
             enc.close_element(ids.ELEM_TYPE)
         elif color is None:
@@ -233,6 +241,6 @@ class ResponseEmitter:
             enc.close_element(ids.ELEM_SYNTAX)
         else:  # constants and anything else -> syntax token with a color
             enc.open_element(ids.ELEM_SYNTAX)
-            enc.write_signed(ids.ATTRIB_COLOR, color)
+            enc.write_unsigned(ids.ATTRIB_COLOR, color)
             enc.write_string(ids.ATTRIB_CONTENT, text)
             enc.close_element(ids.ELEM_SYNTAX)

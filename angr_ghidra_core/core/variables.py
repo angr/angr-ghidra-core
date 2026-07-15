@@ -15,15 +15,15 @@ from dataclasses import dataclass
 STACK = "stack"
 REGISTER = "register"
 
-# undefined-by-size core type names (registered in coretypes)
-_UNDEF_BY_SIZE = {1: "undefined", 2: "undefined2", 4: "undefined4", 8: "undefined8"}
-
-
 def undef_type_for_size(size: int) -> tuple[str, int]:
-    """Return (coretype_name, type_size) for a storage of the given byte size."""
-    if size in _UNDEF_BY_SIZE:
-        return _UNDEF_BY_SIZE[size], size
-    return "undefined", 1
+    """Return (coretype_name, type_size) for a storage of the given byte size.
+    Ghidra's core types provide undefined1..undefined8 (including odd sizes);
+    larger storages clamp to undefined8."""
+    if 1 <= size <= 8:
+        return f"undefined{size}", size
+    if size > 8:
+        return "undefined8", 8
+    return "undefined1", 1
 
 
 @dataclass
