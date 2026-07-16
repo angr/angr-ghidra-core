@@ -19,6 +19,7 @@ from ..ghidra_wire.dump import parse_tree
 from ..ghidra_wire.packed import PackedDecoder, PackedEncoder
 from ..ghidra_wire.server import ServerTransport
 from .emit import ResponseEmitter
+from .prototypes import apply_callee_prototype
 from .spec import SpecInfo, parse_specs
 from .variables import VariableSymbolTable
 
@@ -157,21 +158,28 @@ class AngrCore:
         return attrs.get(ids.ATTRIB_OFFSET, 0), attrs.get(ids.ATTRIB_SIZE, 8)
 
     def _query_function(self, entry: int) -> tuple[str, int | None]:
+        fn = self._query_mapped_function(entry)
+        if fn is None:
+            return f"func_{entry:x}", None
+        return fn.attr("name", f"func_{entry:x}"), fn.attr("size")
+
+    def _query_mapped_function(self, entry: int):
+        """Return the model <function> Element from getMappedSymbols, or None."""
         enc = PackedEncoder()
         enc.open_element(ids.ELEM_COMMAND_GETMAPPEDSYMBOLS)
         encode_addr(enc, Addr(self.spec.space_ram, entry))
         enc.close_element(ids.ELEM_COMMAND_GETMAPPEDSYMBOLS)
         kind, payload = self.t.query(enc)
         if kind != "string" or not payload:
-            return f"func_{entry:x}", None
-        roots = parse_tree(payload)
-        # <doc><mapsym><function name size>...
-        for root in roots:
+            return None
+        for root in parse_tree(payload):
             for mapsym in root.find("mapsym"):
                 fn = mapsym.first("function")
                 if fn is not None:
-                    return fn.attr("name", f"func_{entry:x}"), fn.attr("size")
-        return f"func_{entry:x}", None
+                    if os.environ.get("ANGR_GHIDRA_DEBUG"):
+                        log.error("mapped %#x proto:\n%s", entry, fn.pretty(max_depth=6))
+                    return fn
+        return None
 
     def _query_code_label(self, addr: int) -> str:
         enc = PackedEncoder()
@@ -182,20 +190,6 @@ class AngrCore:
         if kind == "string" and payload:
             return payload.decode("utf-8")
         return ""
-
-    def _query_target_name(self, addr: int) -> str | None:
-        """Resolve a call target's display name the way Ghidra's own decompiler
-        does: the function symbol's base name (via getMappedSymbols), not
-        getCodeLabel -- which namespace-qualifies external functions as
-        "<EXTERNAL>_atoi". getCodeLabel is the last resort, with that namespace
-        prefix stripped."""
-        mapped, _size = self._query_function(addr)
-        label = self._query_code_label(addr)
-        if os.environ.get("ANGR_GHIDRA_DEBUG"):
-            log.error("target %#x: mapped=%r label=%r", addr, mapped, label)
-        if mapped and not mapped.startswith("func_"):
-            return clean_symbol_name(mapped)
-        return clean_symbol_name(label) or None
 
     WINDOW = 0x2000       # max bytes to pull for one function
     CHUNK = 0x100         # granularity for probing readable extent
@@ -270,11 +264,11 @@ class AngrCore:
         return dec.codegen, proj.arch, func_size
 
     def _name_call_targets(self, proj, func, entry: int, size: int) -> None:
-        """Resolve each call target's name from Ghidra (getCodeLabel) and create a
-        named, returning function stub in angr's KB so calls render with names
-        instead of raw addresses. Targets are found by scanning the function's
-        call instructions (they lie outside the scoped blob, so the CFG doesn't
-        register them itself)."""
+        """For each call target, create a named, returning function stub in angr's
+        KB and give it the callee's prototype, so calls render with names AND
+        arguments. Targets lie outside the scoped blob, so the CFG doesn't
+        register them itself; we scan the function's call instructions. Name and
+        prototype both come from one getMappedSymbols query per target."""
         targets: set[int] = set()
         for block in func.blocks:
             try:
@@ -290,15 +284,34 @@ class AngrCore:
         for tgt in targets:
             if tgt == entry:
                 continue
+            fn_el = None
             try:
-                label = self._query_target_name(tgt)
+                fn_el = self._query_mapped_function(tgt)
             except Exception:
-                label = None
-            name = label or f"sub_{tgt:x}"
+                fn_el = None
+            name = self._target_name(tgt, fn_el)
             stub = proj.kb.functions.function(addr=tgt, name=name, create=True)
             # external stubs have no body; assume they return so the decompiler
             # emits normal call statements (not "/* do not return */")
             stub.returning = True
+            # give the stub the callee's prototype so angr recovers call args
+            try:
+                apply_callee_prototype(stub, fn_el, name, proj.arch)
+            except Exception:
+                pass
+
+    def _target_name(self, tgt: int, fn_el) -> str:
+        """Clean base name for a call target, from the mapped function or, failing
+        that, getCodeLabel (namespace prefix stripped)."""
+        if fn_el is not None:
+            mapped = fn_el.attr("name")
+            if mapped and not mapped.startswith("func_"):
+                return clean_symbol_name(mapped)
+        try:
+            label = clean_symbol_name(self._query_code_label(tgt))
+        except Exception:
+            label = None
+        return label or f"sub_{tgt:x}"
 
 
 def main() -> None:
