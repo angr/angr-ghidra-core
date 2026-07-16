@@ -1,0 +1,39 @@
+# angr-decompile launcher configuration.
+#
+# Copy this file next to the `decompile` / `decompile.exe` binary (i.e. into
+# Ghidra's Decompiler os/<platform>/ directory) and rename it to
+# `angr-decompile.conf`. Every setting is optional. A matching environment
+# variable, if set, overrides the value here. Relative paths are resolved
+# against this file's directory. Values may be quoted ("...") if they contain
+# spaces or a '#'.
+
+# Python interpreter that has angr, pypcode and cle installed.
+#   env override: ANGR_GHIDRA_PYTHON
+# python = C:\path\to\angr-venv\Scripts\python.exe
+
+# The angr core entry point (the `bin/angr-decompile` script in this repo).
+# If omitted, the launcher looks for `angr-decompile` next to this binary, then
+# falls back to `python -m angr_ghidra_core.core.angr_core`.
+#   env override: ANGR_GHIDRA_CORE
+# core = C:\path\to\angr-ghidra-core\bin\angr-decompile
+
+# Make the angr_ghidra_core package importable without installing it: point this
+# at the repo root. Prepended to any existing PYTHONPATH.
+# pythonpath = C:\path\to\angr-ghidra-core
+
+# Debug log. A directory value produces one file per process
+# (angr-decompile-<pid>.log); a file value is appended to. Captures the child's
+# stderr (Python traceback) behind "the pipe has ended".
+#   env override: ANGR_GHIDRA_LOG
+# log = C:\temp\angr-logs
+
+# Also dump raw protocol bytes to <log>.stdin.bin / <log>.stdout.bin.
+#   env override: ANGR_GHIDRA_LOG_IO
+# log_io = 1
+
+# Restore the original C++ core: point this at the stock decompiler binary.
+#   env override: ANGR_GHIDRA_FALLBACK
+# fallback = C:\path\to\ghidra\...\os\win_x86_64\decompile.orig.exe
+
+# Arbitrary extra environment variables for the child process:
+# env.SOME_VAR = some value

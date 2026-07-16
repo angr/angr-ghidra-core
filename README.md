@@ -108,24 +108,47 @@ cp target/release/decompile \
    <ghidra>/Ghidra/Features/Decompiler/os/linux_x86_64/decompile
 ```
 
-The launcher honours these environment variables:
+### Configuration
 
-| Variable | Meaning |
-|---|---|
-| `ANGR_GHIDRA_PYTHON` | Python interpreter to use (default: search `PATH`) |
-| `ANGR_GHIDRA_CORE` | Path to the angr core entry (default: `angr-decompile` next to the binary, else `python -m angr_ghidra_core.core.angr_core`) |
-| `ANGR_GHIDRA_FALLBACK` | If set, exec this stock `decompile` binary instead — an escape hatch to restore the original C++ core |
-| `ANGR_GHIDRA_LOG` | If set, write a debug log here. A **directory** value gets a per-pid file (`angr-decompile-<pid>.log`); otherwise the value is a log file path (appended). Records the resolved interpreter/core/env, spawn result, exit status, and the child's stderr — e.g. the Python traceback behind *"Unable to initialize decompiler interface; the pipe has ended."* |
-| `ANGR_GHIDRA_LOG_IO` | With `ANGR_GHIDRA_LOG` set, also dump the raw protocol bytes to `<log>.stdin.bin` / `<log>.stdout.bin` for wire-level debugging. |
+Because Ghidra spawns the decompiler itself, setting environment variables for it
+is awkward (especially on Windows). The launcher instead reads a config file that
+sits **next to the binary** — `angr-decompile.conf` (or `decompile.conf`) in the
+same `os/<platform>/` directory. See `launcher/angr-decompile.conf.example`:
 
-**Debugging a startup failure.** Point `ANGR_GHIDRA_LOG` at a writable path
-before launching Ghidra (a directory is cleanest — Ghidra runs several decompiler
-processes at once, and each gets its own file). Reproduce, then read the log: the
-child's stderr (a `ModuleNotFoundError`, an `angr`/`pypcode` import error, a wrong
-core path, …) is captured there even though Ghidra only reports "the pipe has
-ended". Enabling the log switches the launcher to a spawn-and-wait model on all
-platforms (it still forwards stderr to Ghidra); normal operation uses a direct
-`exec` on Unix.
+```ini
+# angr-decompile.conf  (next to decompile / decompile.exe)
+python     = C:\path\to\angr-venv\Scripts\python.exe
+core       = C:\path\to\angr-ghidra-core\bin\angr-decompile
+pythonpath = C:\path\to\angr-ghidra-core      # makes angr_ghidra_core importable
+log        = C:\temp\angr-logs                # debug log (dir -> per-pid files)
+# log_io   = 1                                # also dump raw protocol bytes
+# fallback = ...\decompile.orig.exe           # restore the original C++ core
+# env.NAME = value                            # extra child env vars
+```
+
+| Config key | Env override | Meaning |
+|---|---|---|
+| `python` | `ANGR_GHIDRA_PYTHON` | interpreter with angr/pypcode/cle (default: search `PATH`) |
+| `core` | `ANGR_GHIDRA_CORE` | angr core entry (default: `angr-decompile` next to the binary, else `python -m angr_ghidra_core.core.angr_core`) |
+| `pythonpath` | `PYTHONPATH` (prepended) | import path for the core, so the package need not be installed |
+| `fallback` | `ANGR_GHIDRA_FALLBACK` | run this stock `decompile` binary instead (restore the C++ core) |
+| `log` | `ANGR_GHIDRA_LOG` | debug log; a **directory** yields per-pid files, a file is appended |
+| `log_io` | `ANGR_GHIDRA_LOG_IO` | also dump raw protocol bytes to `<log>.stdin.bin` / `.stdout.bin` |
+| `env.NAME` | — | set arbitrary environment variables on the child |
+
+An environment variable, if set, overrides the file. Relative paths in the config
+are resolved against the config file's directory. Values may be quoted.
+
+**Debugging a startup failure** (e.g. *"Unable to initialize decompiler
+interface; the pipe has ended"* — the core died during registration). Set `log`
+in the config (a directory is cleanest — Ghidra runs several decompiler processes
+at once, each getting its own file), reproduce, then read the log: it records the
+resolved interpreter/core/env and captures the child's stderr — the Python
+traceback (a `ModuleNotFoundError`, an `angr`/`pypcode` import error, a wrong core
+path, …) that Ghidra otherwise swallows. Add `log_io` to also see the raw
+protocol bytes and pinpoint how far registration got. Enabling the log switches
+the launcher to a spawn-and-wait model on all platforms (it still forwards stderr
+to Ghidra); normal operation uses a direct `exec` on Unix.
 
 ## Status and roadmap
 
