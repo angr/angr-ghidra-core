@@ -98,6 +98,14 @@ public class ValidateAngrCore extends GhidraScript {
 				check(lsm != null && nsym >= 5,
 					"LocalSymbolMap has >=5 symbols (got " + nsym + ")");
 				check(hf.getFunctionPrototype() != null, "FunctionPrototype non-null");
+				// p-code op graph
+				int nops = 0;
+				java.util.Iterator<ghidra.program.model.pcode.PcodeOpAST> ops = hf.getPcodeOps();
+				while (ops.hasNext()) { ops.next(); nops++; }
+				int nblocks = hf.getBasicBlocks().size();
+				println("ANGR_CORE_VALIDATION: pcodeOps=" + nops + " basicBlocks=" + nblocks);
+				check(nops > 0, "HighFunction has p-code ops");
+				check(nblocks > 0, "HighFunction has basic blocks");
 			}
 
 			// --- C markup tokens ---

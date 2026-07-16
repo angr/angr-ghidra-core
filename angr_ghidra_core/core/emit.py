@@ -45,16 +45,19 @@ def _color_for(obj) -> int | None:
 
 class ResponseEmitter:
     def __init__(self, space_ram: int, space_register: int, return_register: tuple[int, int],
-                 coretype_ids: dict):
+                 coretype_ids: dict, space_unique: int = 4):
         self.space_ram = space_ram
         self.space_register = space_register
+        self.space_unique = space_unique
         self.return_register = return_register
         self.coretype_ids = coretype_ids
+        self.space_const = 0  # ConstantSpace is always index 0
 
-    def emit_doc(self, name: str, entry: int, size: int, codegen, var_table=None) -> bytes:
+    def emit_doc(self, name: str, entry: int, size: int, codegen, var_table=None,
+                 translator=None) -> bytes:
         enc = PackedEncoder()
         enc.open_element(ids.ELEM_DOC)
-        self._emit_model_function(enc, name, entry, size, var_table)
+        self._emit_model_function(enc, name, entry, size, var_table, translator)
         self._emit_markup_function(enc, codegen, var_table)
         enc.close_element(ids.ELEM_DOC)
         return enc.to_bytes()
@@ -119,7 +122,7 @@ class ResponseEmitter:
     # ---- model <function> (HighFunction.decode-compatible, no ast/highlist) ----
 
     def _emit_model_function(self, enc: PackedEncoder, name: str, entry: int, size: int,
-                             var_table) -> None:
+                             var_table, translator=None) -> None:
         enc.open_element(ids.ELEM_FUNCTION)
         enc.write_string(ids.ATTRIB_NAME, name)
         enc.write_signed(ids.ATTRIB_SIZE, max(size, 1))
@@ -153,7 +156,7 @@ class ResponseEmitter:
         # <localdb> (highlist resolves symrefs against the LocalSymbolMap) and
         # the varnodes must be registered before the highlist references them.
         if var_table is not None and var_table.symbols:
-            self._emit_ast(enc, var_table)
+            self._emit_ast(enc, var_table, translator)
             self._emit_highlist(enc, var_table)
 
         enc.open_element(ids.ELEM_PROTOTYPE)
@@ -191,16 +194,91 @@ class ResponseEmitter:
             enc.write_bool(ids.ATTRIB_ADDRTIED, True)
         enc.close_element(ids.ELEM_ADDR)
 
-    def _emit_ast(self, enc: PackedEncoder, var_table) -> None:
-        """A minimal <ast>: the representative varnodes, no basic blocks.
-        PcodeSyntaxTree.decode accepts an empty/blockless AST (the block loop
-        breaks immediately)."""
+    def _emit_ast(self, enc: PackedEncoder, var_table, translator=None) -> None:
+        """The <ast>: all varnodes, then basic blocks with their p-code ops, then
+        block edges. Without a translator, falls back to a blockless AST of just
+        the representative varnodes (PcodeSyntaxTree.decode accepts that)."""
+        if translator is None:
+            enc.open_element(ids.ELEM_AST)
+            enc.open_element(ids.ELEM_VARNODES)
+            for sym in var_table.symbols:
+                self._emit_var_storage_addr(enc, sym, ref=sym.varnode_ref, addrtied=True)
+            enc.close_element(ids.ELEM_VARNODES)
+            enc.close_element(ids.ELEM_AST)
+            return
+
+        stack_reps = {s.offset for s in var_table.symbols if s.storage_kind == "stack"}
         enc.open_element(ids.ELEM_AST)
         enc.open_element(ids.ELEM_VARNODES)
-        for sym in var_table.symbols:
-            self._emit_var_storage_addr(enc, sym, ref=sym.varnode_ref, addrtied=True)
+        for vn in translator.varnodes:
+            self._emit_pcode_varnode(enc, vn, addrtied=(vn.space == "stack"
+                                                        and vn.offset in stack_reps))
         enc.close_element(ids.ELEM_VARNODES)
+        for blk in translator.blocks:
+            self._emit_block(enc, blk, translator)
+        for blk in translator.blocks:
+            if blk.in_edges:
+                enc.open_element(ids.ELEM_BLOCKEDGE)
+                enc.write_signed(ids.ATTRIB_INDEX, blk.index)
+                for src_index, rev in blk.in_edges:
+                    enc.open_element(ids.ELEM_EDGE)
+                    enc.write_signed(ids.ATTRIB_END, src_index)
+                    enc.write_signed(ids.ATTRIB_REV, rev)
+                    enc.close_element(ids.ELEM_EDGE)
+                enc.close_element(ids.ELEM_BLOCKEDGE)
         enc.close_element(ids.ELEM_AST)
+
+    def _emit_pcode_varnode(self, enc, vn, ref=None, addrtied=False) -> None:
+        enc.open_element(ids.ELEM_ADDR)
+        enc.write_unsigned(ids.ATTRIB_REF, vn.ref if ref is None else ref)
+        if vn.space == "const":
+            enc.write_space(ids.ATTRIB_SPACE, self.space_const)
+        elif vn.space == "stack":
+            enc.write_special_space(ids.ATTRIB_SPACE, 0)
+        elif vn.space == "register":
+            enc.write_space(ids.ATTRIB_SPACE, self.space_register)
+        else:  # unique
+            enc.write_space(ids.ATTRIB_SPACE, self.space_unique)
+        enc.write_unsigned(ids.ATTRIB_OFFSET, vn.offset & 0xFFFFFFFFFFFFFFFF)
+        enc.write_signed(ids.ATTRIB_SIZE, vn.size)
+        if addrtied:
+            enc.write_bool(ids.ATTRIB_ADDRTIED, True)
+        enc.close_element(ids.ELEM_ADDR)
+
+    def _emit_block(self, enc, blk, translator) -> None:
+        enc.open_element(ids.ELEM_BLOCK)
+        enc.write_signed(ids.ATTRIB_INDEX, blk.index)
+        enc.open_element(ids.ELEM_RANGELIST)
+        enc.open_element(ids.ELEM_RANGE)
+        enc.write_space(ids.ATTRIB_SPACE, self.space_ram)
+        enc.write_unsigned(ids.ATTRIB_FIRST, blk.addr)
+        enc.write_unsigned(ids.ATTRIB_LAST, blk.addr_last)
+        enc.close_element(ids.ELEM_RANGE)
+        enc.close_element(ids.ELEM_RANGELIST)
+        for op in translator.ops_by_block(blk):
+            self._emit_pcode_op(enc, op)
+        enc.close_element(ids.ELEM_BLOCK)
+
+    def _emit_pcode_op(self, enc, op) -> None:
+        enc.open_element(ids.ELEM_OP)
+        enc.write_opcode(ids.ATTRIB_CODE, op.opcode)
+        enc.open_element(ids.ELEM_SEQNUM)
+        enc.write_unsigned(ids.ATTRIB_UNIQ, op.time)
+        enc.write_space(ids.ATTRIB_SPACE, self.space_ram)
+        enc.write_unsigned(ids.ATTRIB_OFFSET, op.ins_addr)
+        enc.close_element(ids.ELEM_SEQNUM)
+        if op.output is None:
+            enc.open_element(ids.ELEM_VOID)
+            enc.close_element(ids.ELEM_VOID)
+        else:
+            enc.open_element(ids.ELEM_ADDR)
+            enc.write_unsigned(ids.ATTRIB_REF, op.output)
+            enc.close_element(ids.ELEM_ADDR)
+        for ref in op.inputs:
+            enc.open_element(ids.ELEM_ADDR)
+            enc.write_unsigned(ids.ATTRIB_REF, ref)
+            enc.close_element(ids.ELEM_ADDR)
+        enc.close_element(ids.ELEM_OP)
 
     def _emit_highlist(self, enc: PackedEncoder, var_table) -> None:
         """One <high> per variable (HighLocal / HighParam): symref links to the

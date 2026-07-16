@@ -27,6 +27,7 @@ from .prototypes import (
     set_stub_prototype,
 )
 from .spec import SpecInfo, parse_specs
+from .pcode import PcodeTranslator
 from .variables import VariableSymbolTable
 
 log = logging.getLogger("angr_ghidra_core")
@@ -103,7 +104,7 @@ class AngrCore:
         off, size = self._query_register(self.spec.return_register_name)
         self.emitter = ResponseEmitter(
             self.spec.space_ram, self.spec.space_register, (off, size),
-            self.spec.coretype_ids,
+            self.spec.coretype_ids, space_unique=self.spec.space_unique,
         )
 
     def cmd_deregisterProgram(self, params: list[bytes]):
@@ -152,10 +153,11 @@ class AngrCore:
         # honour user edits (renames/retypes) committed to Ghidra's DB: they come
         # back in the localdb as locked symbols; apply them to angr's variables.
         edits = parse_user_edits(fn_el)
-        codegen, arch, func_size = self._decompile(entry, name, code, edits)
+        codegen, arch, func_size, ail_graph = self._decompile(entry, name, code, edits)
+        translator = self._build_pcode(ail_graph, arch)
         var_table = VariableSymbolTable(self._query_register, self.spec.space_register)
-        var_table.build(codegen, arch)
-        doc = self.emitter.emit_doc(name, entry, func_size, codegen, var_table)
+        var_table.build(codegen, arch, translator)
+        doc = self.emitter.emit_doc(name, entry, func_size, codegen, var_table, translator)
         dump = os.environ.get("ANGR_DUMP_RESPONSE")
         if dump:
             with open(dump, "wb") as fh:
@@ -332,7 +334,29 @@ class AngrCore:
             except Exception:
                 log.exception("applying user edits failed")
         func_size = func.size or len(code)
-        return dec.codegen, arch, func_size
+        return dec.codegen, arch, func_size, dec.ail_graph
+
+    def _build_pcode(self, ail_graph, arch):
+        """Translate the AIL graph into a Ghidra p-code op graph, or None on
+        failure (the model stays valid without it)."""
+        if ail_graph is None:
+            return None
+
+        def reg_lookup(vex_off, size):
+            try:
+                nm = arch.translate_register_name(vex_off, size)
+                if nm:
+                    off, _ = self._query_register(nm.upper())
+                    return off
+            except Exception:
+                return None
+            return None
+
+        try:
+            return PcodeTranslator(reg_lookup).translate(ail_graph)
+        except Exception:
+            log.exception("p-code translation failed")
+            return None
 
     def _paramid(self, entry: int, name: str, code: bytes) -> bytes:
         """Recover the function's parameters/return with angr and emit them as a

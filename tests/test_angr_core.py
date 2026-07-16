@@ -92,8 +92,9 @@ def test_ast_highlist_and_varref_chain(angr_session):
     res = angr_session.decompile("main")
     hf = res.high_function
 
-    # one representative varnode + one HighVariable per symbol
-    assert len(hf.varnodes) == len(hf.symbols)
+    # the p-code op graph has many varnodes; one HighVariable per symbol, and a
+    # representative varnode per symbol
+    assert len(hf.varnodes) >= len(hf.symbols)
     assert len(hf.highs) == len(hf.symbols)
 
     vn_by_ref = hf.varnodes_by_ref

@@ -62,8 +62,10 @@ class VariableSymbolTable:
         self._next_id = 0x1001
         self._next_ref = 0x200  # varnode create-index namespace (distinct from ids)
 
-    def build(self, codegen, arch) -> None:
+    def build(self, codegen, arch, translator=None) -> None:
         from angr.sim_variable import SimRegisterVariable, SimStackVariable
+
+        self._translator = translator
 
         param_index = 0
         for _text, obj in codegen.cfunc.c_repr_chunks(indent=0):
@@ -109,8 +111,14 @@ class VariableSymbolTable:
             else:
                 continue  # skip globals/memory vars for now
 
-            sym.varnode_ref = self._next_ref
-            self._next_ref += 1
+            # the representative varnode links tokens/HighVariables into the op
+            # graph: reuse the op-graph varnode at this storage when available
+            if self._translator is not None:
+                sym.varnode_ref = self._translator.variable_representative(
+                    sym.storage_kind, sym.offset, sym.size)
+            else:
+                sym.varnode_ref = self._next_ref
+                self._next_ref += 1
             self.by_var_id[id(var)] = sym
             self.symbols.append(sym)
 
