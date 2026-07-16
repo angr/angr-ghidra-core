@@ -115,6 +115,17 @@ The launcher honours these environment variables:
 | `ANGR_GHIDRA_PYTHON` | Python interpreter to use (default: search `PATH`) |
 | `ANGR_GHIDRA_CORE` | Path to the angr core entry (default: `angr-decompile` next to the binary, else `python -m angr_ghidra_core.core.angr_core`) |
 | `ANGR_GHIDRA_FALLBACK` | If set, exec this stock `decompile` binary instead — an escape hatch to restore the original C++ core |
+| `ANGR_GHIDRA_LOG` | If set, write a debug log here. A **directory** value gets a per-pid file (`angr-decompile-<pid>.log`); otherwise the value is a log file path (appended). Records the resolved interpreter/core/env, spawn result, exit status, and the child's stderr — e.g. the Python traceback behind *"Unable to initialize decompiler interface; the pipe has ended."* |
+| `ANGR_GHIDRA_LOG_IO` | With `ANGR_GHIDRA_LOG` set, also dump the raw protocol bytes to `<log>.stdin.bin` / `<log>.stdout.bin` for wire-level debugging. |
+
+**Debugging a startup failure.** Point `ANGR_GHIDRA_LOG` at a writable path
+before launching Ghidra (a directory is cleanest — Ghidra runs several decompiler
+processes at once, and each gets its own file). Reproduce, then read the log: the
+child's stderr (a `ModuleNotFoundError`, an `angr`/`pypcode` import error, a wrong
+core path, …) is captured there even though Ghidra only reports "the pipe has
+ended". Enabling the log switches the launcher to a spawn-and-wait model on all
+platforms (it still forwards stderr to Ghidra); normal operation uses a direct
+`exec` on Unix.
 
 ## Status and roadmap
 
