@@ -4,8 +4,13 @@ a minimal-but-valid model <function> plus the Clang C-markup token tree.
 
 from __future__ import annotations
 
+import re
+
 from ..ghidra_wire import ids
 from ..ghidra_wire.packed import PackedEncoder
+
+# split a type name into identifier runs vs everything else (spaces, '*', ...)
+_TYPE_SPLIT = re.compile(r"[A-Za-z0-9_]+|[^A-Za-z0-9_]+")
 
 # Ghidra ClangToken color constants (ClangToken.java:34-44)
 KEYWORD_COLOR = 0
@@ -258,6 +263,24 @@ class ResponseEmitter:
                 self._emit_token(enc, seg, color, varref)
         enc.close_element(ids.ELEM_FUNCTION)
 
+    def _emit_type_token(self, enc: PackedEncoder, text: str) -> None:
+        # Ghidra runs ClangTypeToken content through IllegalCharCppTransformer,
+        # which replaces spaces / '*' with '_' (its own type names are single
+        # words, so it never hits this; angr's are multi-word, e.g. "unsigned
+        # long long"). Emit identifier runs as <type> tokens (colored, and left
+        # unchanged since they have no illegal chars) and the separators between
+        # them as plain <syntax> tokens, which the transformer never touches.
+        for part in _TYPE_SPLIT.findall(text):
+            if part[0].isalnum() or part[0] == "_":
+                enc.open_element(ids.ELEM_TYPE)
+                enc.write_unsigned(ids.ATTRIB_COLOR, TYPE_COLOR)
+                enc.write_string(ids.ATTRIB_CONTENT, part)
+                enc.close_element(ids.ELEM_TYPE)
+            else:
+                enc.open_element(ids.ELEM_SYNTAX)
+                enc.write_string(ids.ATTRIB_CONTENT, part)
+                enc.close_element(ids.ELEM_SYNTAX)
+
     def _emit_token(self, enc: PackedEncoder, text: str, color: int | None,
                     varref: int | None = None) -> None:
         if color == VARIABLE_COLOR:
@@ -273,10 +296,7 @@ class ResponseEmitter:
             enc.write_string(ids.ATTRIB_CONTENT, text)
             enc.close_element(ids.ELEM_FUNCNAME)
         elif color == TYPE_COLOR:
-            enc.open_element(ids.ELEM_TYPE)
-            enc.write_unsigned(ids.ATTRIB_COLOR, color)
-            enc.write_string(ids.ATTRIB_CONTENT, text)
-            enc.close_element(ids.ELEM_TYPE)
+            self._emit_type_token(enc, text)
         elif color is None:
             enc.open_element(ids.ELEM_SYNTAX)
             enc.write_string(ids.ATTRIB_CONTENT, text)
