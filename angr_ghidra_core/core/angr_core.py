@@ -27,6 +27,15 @@ log = logging.getLogger("angr_ghidra_core")
 WINDOW_PAD = 0x40  # bytes fetched before/after the function body for CFG context
 
 
+def clean_symbol_name(name: str) -> str:
+    """Strip Ghidra's getCodeLabel namespace prefix. getSymbolName prefixes a
+    label with "<namespace>_", so external functions come back as
+    "<EXTERNAL>_atoi"; return just the base name ("atoi")."""
+    if name and name.startswith("<") and ">_" in name:
+        return name.split(">_", 1)[1]
+    return name
+
+
 class AngrCore:
     def __init__(self, transport: ServerTransport):
         self.t = transport
@@ -172,6 +181,17 @@ class AngrCore:
             return payload.decode("utf-8")
         return ""
 
+    def _query_target_name(self, addr: int) -> str | None:
+        """Resolve a call target's display name the way Ghidra's own decompiler
+        does: the function symbol's base name (via getMappedSymbols), not
+        getCodeLabel -- which namespace-qualifies external functions as
+        "<EXTERNAL>_atoi". getCodeLabel is the last resort, with that namespace
+        prefix stripped."""
+        name, _size = self._query_function(addr)
+        if name and not name.startswith("func_"):
+            return name
+        return clean_symbol_name(self._query_code_label(addr)) or None
+
     WINDOW = 0x2000       # max bytes to pull for one function
     CHUNK = 0x100         # granularity for probing readable extent
 
@@ -266,9 +286,9 @@ class AngrCore:
             if tgt == entry:
                 continue
             try:
-                label = self._query_code_label(tgt)
+                label = self._query_target_name(tgt)
             except Exception:
-                label = ""
+                label = None
             name = label or f"sub_{tgt:x}"
             stub = proj.kb.functions.function(addr=tgt, name=name, create=True)
             # external stubs have no body; assume they return so the decompiler
