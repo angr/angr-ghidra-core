@@ -171,7 +171,8 @@ class ResponseEmitter:
         enc.close_element(ids.ELEM_PROTOTYPE)
         enc.close_element(ids.ELEM_FUNCTION)
 
-    def _emit_var_storage_addr(self, enc: PackedEncoder, sym, ref: int | None = None) -> None:
+    def _emit_var_storage_addr(self, enc: PackedEncoder, sym, ref: int | None = None,
+                               addrtied: bool = False) -> None:
         """Encode a <addr> for a variable's storage, optionally with a varnode ref."""
         enc.open_element(ids.ELEM_ADDR)
         if ref is not None:
@@ -182,6 +183,12 @@ class ResponseEmitter:
             enc.write_space(ids.ATTRIB_SPACE, sym.space)
         enc.write_unsigned(ids.ATTRIB_OFFSET, sym.offset & 0xFFFFFFFFFFFFFFFF)
         enc.write_signed(ids.ATTRIB_SIZE, sym.size)
+        # An addr-tied representative makes Ghidra store the variable (and any
+        # rename/retype) at its fixed address rather than a DynamicHash -- which
+        # would need the full p-code op graph to round-trip. Stack locals live at
+        # a fixed slot, so this is accurate.
+        if addrtied and sym.storage_kind == "stack":
+            enc.write_bool(ids.ATTRIB_ADDRTIED, True)
         enc.close_element(ids.ELEM_ADDR)
 
     def _emit_ast(self, enc: PackedEncoder, var_table) -> None:
@@ -191,7 +198,7 @@ class ResponseEmitter:
         enc.open_element(ids.ELEM_AST)
         enc.open_element(ids.ELEM_VARNODES)
         for sym in var_table.symbols:
-            self._emit_var_storage_addr(enc, sym, ref=sym.varnode_ref)
+            self._emit_var_storage_addr(enc, sym, ref=sym.varnode_ref, addrtied=True)
         enc.close_element(ids.ELEM_VARNODES)
         enc.close_element(ids.ELEM_AST)
 

@@ -72,7 +72,11 @@ class VariableSymbolTable:
             var = obj.variable
             if var is None or id(var) in self.by_var_id:
                 continue
-            name = getattr(var, "name", None) or f"var_{len(self.symbols)}"
+            # display name comes from the unified variable (what tokens show, and
+            # where renames land); fall back to the raw variable name
+            uv = obj.unified_variable
+            name = (getattr(uv, "name", None) if uv is not None else None) \
+                or getattr(var, "name", None) or f"var_{len(self.symbols)}"
             ident = getattr(var, "ident", "") or ""
             is_param = isinstance(var, SimRegisterVariable) and ident.startswith("arg_")
 

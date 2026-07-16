@@ -18,6 +18,7 @@ from ..ghidra_wire.address import Addr, encode_addr
 from ..ghidra_wire.dump import parse_tree
 from ..ghidra_wire.packed import PackedDecoder, PackedEncoder
 from ..ghidra_wire.server import ServerTransport
+from .edits import apply_user_edits, parse_user_edits
 from .emit import ResponseEmitter
 from .prototypes import (
     prototype_from_ghidra,
@@ -132,7 +133,8 @@ class AngrCore:
         dec.close_element_skipping(el)
 
         self._ensure_emitter()
-        name, _size = self._query_function(entry)
+        fn_el = self._query_mapped_function(entry)
+        name = (fn_el.attr("name") if fn_el is not None else None) or f"func_{entry:x}"
         # NOTE: the getMappedSymbols size is the symbol's storage size (e.g. a
         # pointer width), NOT the function's code length -- the real core never
         # needs the length because it follows p-code flow. So fetch a generous
@@ -147,6 +149,9 @@ class AngrCore:
             return self._paramid(entry, name, code)
 
         codegen, arch, func_size = self._decompile(entry, name, code)
+        # honour user edits (renames/retypes) committed to Ghidra's DB: they come
+        # back in the localdb as locked symbols; apply them to angr's variables.
+        self._apply_user_edits(codegen, fn_el, arch)
         var_table = VariableSymbolTable(self._query_register, self.spec.space_register)
         var_table.build(codegen, arch)
         doc = self.emitter.emit_doc(name, entry, func_size, codegen, var_table)
@@ -194,6 +199,42 @@ class AngrCore:
                         log.error("mapped %#x proto:\n%s", entry, fn.pretty(max_depth=6))
                     return fn
         return None
+
+    def _query_register_name(self, offset: int, size: int) -> str | None:
+        enc = PackedEncoder()
+        enc.open_element(ids.ELEM_COMMAND_GETREGISTERNAME)
+        enc.open_element(ids.ELEM_ADDR)
+        enc.write_space(ids.ATTRIB_SPACE, self.spec.space_register)
+        enc.write_unsigned(ids.ATTRIB_OFFSET, offset)
+        enc.write_signed(ids.ATTRIB_SIZE, size)
+        enc.close_element(ids.ELEM_ADDR)
+        enc.close_element(ids.ELEM_COMMAND_GETREGISTERNAME)
+        kind, payload = self.t.query(enc)
+        if kind == "string" and payload:
+            return payload.decode("utf-8")
+        return None
+
+    def _apply_user_edits(self, codegen, fn_el, arch) -> None:
+        edits = parse_user_edits(fn_el)
+        if not edits:
+            return
+
+        def reg_to_angr(offset, size):
+            try:
+                nm = self._query_register_name(offset, size)
+                if nm:
+                    return arch.registers[nm.lower()]
+            except Exception:
+                return None
+            return None
+
+        def set_type(uv, type_el):
+            return False  # retype handled in the type-mapping step
+
+        try:
+            apply_user_edits(codegen, edits, self.spec.space_register, reg_to_angr, set_type)
+        except Exception:
+            log.exception("apply_user_edits failed")
 
     def _query_code_label(self, addr: int) -> str:
         enc = PackedEncoder()
