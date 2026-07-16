@@ -29,10 +29,12 @@ WINDOW_PAD = 0x40  # bytes fetched before/after the function body for CFG contex
 
 def clean_symbol_name(name: str) -> str:
     """Strip Ghidra's getCodeLabel namespace prefix. getSymbolName prefixes a
-    label with "<namespace>_", so external functions come back as
-    "<EXTERNAL>_atoi"; return just the base name ("atoi")."""
-    if name and name.startswith("<") and ">_" in name:
-        return name.split(">_", 1)[1]
+    label with its namespace path ("<ns>_<ns>_..._name"), so external functions
+    come back as "<EXTERNAL>_atoi" (and library-nested ones as
+    "<EXTERNAL>_libc.so.6_atoi"). Drop each leading angle-bracketed namespace
+    segment, returning the base name ("atoi")."""
+    while name and name.startswith("<") and ">_" in name:
+        name = name.split(">_", 1)[1]
     return name
 
 
@@ -187,10 +189,13 @@ class AngrCore:
         getCodeLabel -- which namespace-qualifies external functions as
         "<EXTERNAL>_atoi". getCodeLabel is the last resort, with that namespace
         prefix stripped."""
-        name, _size = self._query_function(addr)
-        if name and not name.startswith("func_"):
-            return name
-        return clean_symbol_name(self._query_code_label(addr)) or None
+        mapped, _size = self._query_function(addr)
+        label = self._query_code_label(addr)
+        if os.environ.get("ANGR_GHIDRA_DEBUG"):
+            log.error("target %#x: mapped=%r label=%r", addr, mapped, label)
+        if mapped and not mapped.startswith("func_"):
+            return clean_symbol_name(mapped)
+        return clean_symbol_name(label) or None
 
     WINDOW = 0x2000       # max bytes to pull for one function
     CHUNK = 0x100         # granularity for probing readable extent
