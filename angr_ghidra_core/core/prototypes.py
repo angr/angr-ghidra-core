@@ -27,13 +27,17 @@ def ghidra_type_to_sim(tel: Element | None, arch):
     meta = tel.attr("metatype")
     size = tel.attr("size") or 0
     if meta == "ptr":
-        return st.SimTypePointer(st.SimTypeBottom())
+        child = tel.first("type") or tel.first("typeref")
+        pointee = ghidra_type_to_sim(child, arch) if child is not None else st.SimTypeBottom()
+        return st.SimTypePointer(pointee)
     if meta == "bool":
         return st.SimTypeBool()
     if meta == "float":
         return st.SimTypeDouble() if size == 8 else st.SimTypeFloat()
     if meta == "void":
         return st.SimTypeBottom()
+    if size == 1 and tel.attr("char"):
+        return st.SimTypeChar(signed=meta != "uint")
     if meta in ("int", "uint", "unknown", None):
         signed = meta != "uint"
         bits = (size or (arch.bytes if meta is None else 4)) * 8

@@ -7,8 +7,9 @@
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.script.GhidraScript;
+import ghidra.program.model.data.CharDataType;
 import ghidra.program.model.data.DataType;
-import ghidra.program.model.data.IntegerDataType;
+import ghidra.program.model.data.PointerDataType;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.pcode.HighFunctionDBUtil;
@@ -52,8 +53,9 @@ public class EditRoundTrip extends GhidraScript {
             int tx = currentProgram.startTransaction("edit");
             boolean ok = false;
             try {
-                // rename only (null type) -- no size constraint
-                HighFunctionDBUtil.updateDBVariable(target, "renamed_by_user", null,
+                // rename + retype to char* (8 bytes -> matches the 8-byte slot)
+                DataType charPtr = new PointerDataType(CharDataType.dataType);
+                HighFunctionDBUtil.updateDBVariable(target, "renamed_by_user", charPtr,
                     SourceType.USER_DEFINED);
                 ok = true;
             } finally {

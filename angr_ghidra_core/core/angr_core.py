@@ -18,9 +18,10 @@ from ..ghidra_wire.address import Addr, encode_addr
 from ..ghidra_wire.dump import parse_tree
 from ..ghidra_wire.packed import PackedDecoder, PackedEncoder
 from ..ghidra_wire.server import ServerTransport
-from .edits import apply_user_edits, parse_user_edits
+from .edits import apply_renames, apply_retypes, parse_user_edits
 from .emit import ResponseEmitter
 from .prototypes import (
+    ghidra_type_to_sim,
     prototype_from_ghidra,
     prototype_from_libraries,
     set_stub_prototype,
@@ -148,10 +149,10 @@ class AngrCore:
         if self.action == "paramid":
             return self._paramid(entry, name, code)
 
-        codegen, arch, func_size = self._decompile(entry, name, code)
         # honour user edits (renames/retypes) committed to Ghidra's DB: they come
         # back in the localdb as locked symbols; apply them to angr's variables.
-        self._apply_user_edits(codegen, fn_el, arch)
+        edits = parse_user_edits(fn_el)
+        codegen, arch, func_size = self._decompile(entry, name, code, edits)
         var_table = VariableSymbolTable(self._query_register, self.spec.space_register)
         var_table.build(codegen, arch)
         doc = self.emitter.emit_doc(name, entry, func_size, codegen, var_table)
@@ -214,12 +215,8 @@ class AngrCore:
             return payload.decode("utf-8")
         return None
 
-    def _apply_user_edits(self, codegen, fn_el, arch) -> None:
-        edits = parse_user_edits(fn_el)
-        if not edits:
-            return
-
-        def reg_to_angr(offset, size):
+    def _reg_to_angr(self, arch):
+        def resolve(offset, size):
             try:
                 nm = self._query_register_name(offset, size)
                 if nm:
@@ -227,14 +224,7 @@ class AngrCore:
             except Exception:
                 return None
             return None
-
-        def set_type(uv, type_el):
-            return False  # retype handled in the type-mapping step
-
-        try:
-            apply_user_edits(codegen, edits, self.spec.space_register, reg_to_angr, set_type)
-        except Exception:
-            log.exception("apply_user_edits failed")
+        return resolve
 
     def _query_code_label(self, addr: int) -> str:
         enc = PackedEncoder()
@@ -318,14 +308,31 @@ class AngrCore:
         func.name = name
         return proj, cfg, func
 
-    def _decompile(self, entry: int, name: str, code: bytes):
+    def _decompile(self, entry: int, name: str, code: bytes, edits=None):
+        from angr.knowledge_base import KnowledgeBase
+
         proj, cfg, func = self._load_and_cfg(entry, name, code)
         self._name_call_targets(proj, func, entry, len(code))
-        dec = proj.analyses.Decompiler(func, cfg=cfg.model)
+        vkb = KnowledgeBase(proj)
+        dec = proj.analyses.Decompiler(func, cfg=cfg.model, variable_kb=vkb)
         if dec.codegen is None:
             raise RuntimeError(f"angr produced no code for {name} @ {entry:#x}")
+        arch = proj.arch
+        if edits:
+            reg_to_angr = self._reg_to_angr(arch)
+            try:
+                # retypes are ground-truth: set them then re-decompile so angr's
+                # type inference honours them
+                retyped = apply_retypes(dec.codegen, edits, vkb.variables[entry],
+                                        reg_to_angr, ghidra_type_to_sim, arch)
+                if retyped:
+                    dec = proj.analyses.Decompiler(func, cfg=cfg.model, variable_kb=vkb)
+                # renames only need a name swap + re-render
+                apply_renames(dec.codegen, edits, reg_to_angr)
+            except Exception:
+                log.exception("applying user edits failed")
         func_size = func.size or len(code)
-        return dec.codegen, proj.arch, func_size
+        return dec.codegen, arch, func_size
 
     def _paramid(self, entry: int, name: str, code: bytes) -> bytes:
         """Recover the function's parameters/return with angr and emit them as a
