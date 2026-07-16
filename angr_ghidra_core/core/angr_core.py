@@ -19,7 +19,11 @@ from ..ghidra_wire.dump import parse_tree
 from ..ghidra_wire.packed import PackedDecoder, PackedEncoder
 from ..ghidra_wire.server import ServerTransport
 from .emit import ResponseEmitter
-from .prototypes import apply_callee_prototype
+from .prototypes import (
+    prototype_from_ghidra,
+    prototype_from_libraries,
+    set_stub_prototype,
+)
 from .spec import SpecInfo, parse_specs
 from .variables import VariableSymbolTable
 
@@ -46,6 +50,7 @@ class AngrCore:
         self.arch_id = 0
         self.action = "decompile"
         self._project_cache: dict = {}
+        self._proto_cache: dict = {}  # callee addr -> recovered prototype (or None)
 
     # ------------------------------------------------------------- main loop
 
@@ -106,6 +111,7 @@ class AngrCore:
 
     def cmd_flushNative(self, params: list[bytes]) -> str:
         self._project_cache.clear()
+        self._proto_cache.clear()
         return "1"
 
     def cmd_setAction(self, params: list[bytes]) -> str:
@@ -132,6 +138,14 @@ class AngrCore:
         # needs the length because it follows p-code flow. So fetch a generous
         # readable window and let angr's CFG find the function's real extent.
         code = self._fetch_window(entry)
+
+        # The paramid action asks only for the recovered parameters/return, so
+        # Ghidra can populate the function signature (its own decompiler does
+        # this too). Returning them here is what makes *calls* to local functions
+        # show arguments on later decompiles.
+        if self.action == "paramid":
+            return self._paramid(entry, name, code)
+
         codegen, arch, func_size = self._decompile(entry, name, code)
         var_table = VariableSymbolTable(self._query_register, self.spec.space_register)
         var_table.build(codegen, arch)
@@ -235,7 +249,7 @@ class AngrCore:
 
     # ------------------------------------------------------------ angr run
 
-    def _decompile(self, entry: int, name: str, code: bytes):
+    def _load_and_cfg(self, entry: int, name: str, code: bytes, function_starts=None):
         import angr
 
         proj = angr.load_shellcode(
@@ -245,10 +259,15 @@ class AngrCore:
             load_address=entry,
             support_selfmodifying_code=False,
         )
+        # extra function starts bound the CFG so a small callee doesn't fall
+        # through into an adjacent function (which corrupts CC recovery)
+        starts = {entry}
+        if function_starts:
+            starts.update(function_starts)
         cfg = proj.analyses.CFGFast(
             normalize=True,
             regions=[(entry, entry + len(code))],
-            function_starts=[entry],
+            function_starts=list(starts),
             start_at_entry=False,
             force_complete_scan=False,
         )
@@ -256,12 +275,60 @@ class AngrCore:
         if func is None:
             func = proj.kb.functions.function(addr=entry, create=True)
         func.name = name
+        return proj, cfg, func
+
+    def _decompile(self, entry: int, name: str, code: bytes):
+        proj, cfg, func = self._load_and_cfg(entry, name, code)
         self._name_call_targets(proj, func, entry, len(code))
         dec = proj.analyses.Decompiler(func, cfg=cfg.model)
         if dec.codegen is None:
             raise RuntimeError(f"angr produced no code for {name} @ {entry:#x}")
         func_size = func.size or len(code)
         return dec.codegen, proj.arch, func_size
+
+    def _paramid(self, entry: int, name: str, code: bytes) -> bytes:
+        """Recover the function's parameters/return with angr and emit them as a
+        <parammeasures> response (the paramid action)."""
+        inputs, output = [], None
+        try:
+            proj, cfg, func = self._load_and_cfg(entry, name, code)
+            proj.analyses.VariableRecoveryFast(func)
+            cca = proj.analyses.CallingConvention(func, cfg=cfg.model, analyze_callsites=True)
+            cc, proto = cca.cc, cca.prototype
+        except Exception:
+            cc = proto = None
+        if cc is not None and proto is not None:
+            for ty, loc in zip(proto.args, cc.arg_locs(proto)):
+                slot = self._arg_slot(loc)
+                if slot is not None:
+                    inputs.append(slot)
+            if proto.returnty is not None:
+                try:
+                    rloc = cc.return_val(proto.returnty)
+                except Exception:
+                    rloc = None
+                rslot = self._arg_slot(rloc) if rloc is not None else None
+                if rslot is not None:
+                    output = rslot
+        if os.environ.get("ANGR_GHIDRA_DEBUG"):
+            log.error("paramid %s @ %#x: cc=%s inputs=%s output=%s",
+                      name, entry, cc, inputs, output)
+        return self.emitter.emit_parammeasures(name, entry, inputs, output)
+
+    def _arg_slot(self, loc):
+        """Map an angr argument location to (space, offset, size, type_name)."""
+        cls = type(loc).__name__
+        size = getattr(loc, "size", 8) or 8
+        type_name = f"undefined{size}" if 1 <= size <= 8 else "undefined8"
+        if cls == "SimRegArg":
+            try:
+                off, rsize = self._query_register(loc.reg_name.upper())
+            except Exception:
+                return None
+            return (self.spec.space_register, off, rsize, type_name)
+        if cls == "SimStackArg":
+            return ("stack", getattr(loc, "stack_offset", 0), size, type_name)
+        return None
 
     def _name_call_targets(self, proj, func, entry: int, size: int) -> None:
         """For each call target, create a named, returning function stub in angr's
@@ -294,11 +361,51 @@ class AngrCore:
             # external stubs have no body; assume they return so the decompiler
             # emits normal call statements (not "/* do not return */")
             stub.returning = True
-            # give the stub the callee's prototype so angr recovers call args
+            # give the stub the callee's prototype so angr recovers call args.
+            # entry + sibling call targets bound each callee's own recovery.
             try:
-                apply_callee_prototype(stub, fn_el, name, proj.arch)
+                proto = self._callee_prototype(tgt, fn_el, name, proj.arch, {entry, *targets})
+                if proto is not None:
+                    set_stub_prototype(stub, proto, proj.arch)
             except Exception:
                 pass
+
+    def _callee_prototype(self, tgt: int, fn_el, name: str, arch, known_starts):
+        """Best prototype for a call target: an authoritative Ghidra signature if
+        it has parameters (libc, user-edited), else a library prototype by name,
+        else one recovered by analysing the callee ourselves (local functions
+        whose params Ghidra hasn't recovered)."""
+        if fn_el is not None:
+            gproto = prototype_from_ghidra(fn_el, arch)
+            if gproto is not None and gproto.args:
+                return gproto
+        libproto = prototype_from_libraries(name)
+        if libproto is not None:
+            return libproto
+        recovered = self._recover_callee_prototype(tgt, known_starts)
+        if recovered is not None:
+            return recovered
+        # last resort: Ghidra's (0-arg) prototype, if any
+        return prototype_from_ghidra(fn_el, arch) if fn_el is not None else None
+
+    def _recover_callee_prototype(self, tgt: int, known_starts):
+        """Analyse a local callee with angr to recover its prototype. Cached per
+        process (cleared by flushNative); None is cached too, to avoid retrying.
+        known_starts bounds the callee so it doesn't merge with a neighbour."""
+        if tgt in self._proto_cache:
+            return self._proto_cache[tgt]
+        proto = None
+        try:
+            code = self._fetch_window(tgt)
+            proj, cfg, func = self._load_and_cfg(tgt, f"sub_{tgt:x}", code, known_starts)
+            proj.analyses.VariableRecoveryFast(func)
+            cca = proj.analyses.CallingConvention(func, cfg=cfg.model, analyze_callsites=True)
+            if cca.cc is not None and cca.prototype is not None:
+                proto = cca.prototype
+        except Exception:
+            proto = None
+        self._proto_cache[tgt] = proto
+        return proto
 
     def _target_name(self, tgt: int, fn_el) -> str:
         """Clean base name for a call target, from the mapped function or, failing

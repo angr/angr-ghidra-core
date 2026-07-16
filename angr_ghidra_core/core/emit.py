@@ -54,6 +54,48 @@ class ResponseEmitter:
         enc.close_element(ids.ELEM_DOC)
         return enc.to_bytes()
 
+    def emit_parammeasures(self, name: str, entry: int, inputs, output) -> bytes:
+        """Response for the paramid action: recovered parameters/return so Ghidra
+        can populate the function signature. `inputs` is a list of (space, offset,
+        size, type_name); `output` is one such tuple or None."""
+        enc = PackedEncoder()
+        enc.open_element(ids.ELEM_DOC)
+        enc.open_element(ids.ELEM_PARAMMEASURES)
+        enc.write_string(ids.ATTRIB_NAME, name)
+        enc.open_element(ids.ELEM_ADDR)
+        enc.write_space(ids.ATTRIB_SPACE, self.space_ram)
+        enc.write_unsigned(ids.ATTRIB_OFFSET, entry)
+        enc.close_element(ids.ELEM_ADDR)
+        enc.open_element(ids.ELEM_PROTO)
+        enc.write_string(ids.ATTRIB_MODEL, "unknown")
+        enc.write_string(ids.ATTRIB_EXTRAPOP, "unknown")
+        enc.close_element(ids.ELEM_PROTO)
+        for rank, (space, offset, size, type_name) in enumerate(inputs):
+            self._emit_parammeasure(enc, ids.ELEM_INPUT, space, offset, size, type_name, rank)
+        if output is not None:
+            space, offset, size, type_name = output
+            self._emit_parammeasure(enc, ids.ELEM_OUTPUT, space, offset, size, type_name, 0)
+        enc.close_element(ids.ELEM_PARAMMEASURES)
+        enc.close_element(ids.ELEM_DOC)
+        return enc.to_bytes()
+
+    def _emit_parammeasure(self, enc, elem, space, offset, size, type_name, rank):
+        # ParamMeasure.decode: varnode, then datatype, then <rank val>
+        enc.open_element(elem)
+        enc.open_element(ids.ELEM_ADDR)
+        if isinstance(space, str) and space == "stack":
+            enc.write_special_space(ids.ATTRIB_SPACE, 0)
+        else:
+            enc.write_space(ids.ATTRIB_SPACE, space)
+        enc.write_unsigned(ids.ATTRIB_OFFSET, offset & 0xFFFFFFFFFFFFFFFF)
+        enc.write_signed(ids.ATTRIB_SIZE, size)
+        enc.close_element(ids.ELEM_ADDR)
+        self._typeref(enc, type_name)
+        enc.open_element(ids.ELEM_RANK)
+        enc.write_signed(ids.ATTRIB_VAL, rank)
+        enc.close_element(ids.ELEM_RANK)
+        enc.close_element(elem)
+
     def _typeref(self, enc: PackedEncoder, name: str) -> None:
         # a typeref must resolve against the registered core types; if the name
         # isn't present, fall back to one that is (undefined8, then any).

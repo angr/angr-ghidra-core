@@ -95,16 +95,10 @@ def prototype_from_libraries(name: str):
     return None
 
 
-def apply_callee_prototype(stub, fn_el: Element | None, name: str, arch) -> bool:
-    """Set stub.prototype + calling_convention from Ghidra (preferred) or angr's
-    library definitions. Returns True if a prototype was applied."""
+def set_stub_prototype(stub, proto, arch) -> bool:
+    """Set stub.prototype + calling_convention from an already-chosen prototype."""
     from angr.calling_conventions import default_cc
 
-    proto = None
-    if fn_el is not None:
-        proto = prototype_from_ghidra(fn_el, arch)
-    if proto is None:
-        proto = prototype_from_libraries(name)
     if proto is None:
         return False
     try:
