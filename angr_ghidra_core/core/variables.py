@@ -9,7 +9,7 @@ matches Ghidra's register space (SLEIGH), not angr's VEX register offset.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # storage kinds
 STACK = "stack"
@@ -44,6 +44,11 @@ class VarSymbol:
     # create-index of the representative varnode in <ast>/<varnodes> (identity
     # key that markup tokens reference via varref)
     varnode_ref: int = 0
+    # all op-graph varnodes belonging to this variable (its HighVariable
+    # instances): the SSA values that render as this variable in the C output.
+    # Only instances get their high set on decode, so every token varref must
+    # appear here. Disjoint across symbols even when storage is shared.
+    member_refs: list[int] = field(default_factory=list)
 
     @property
     def high_class(self) -> str:
@@ -63,64 +68,95 @@ class VariableSymbolTable:
         self._next_ref = 0x200  # varnode create-index namespace (distinct from ids)
 
     def build(self, codegen, arch, translator=None) -> None:
-        from angr.sim_variable import SimRegisterVariable, SimStackVariable
-
         self._translator = translator
+        self._skipped: set[int] = set()
 
+        # first pass: one symbol per SimVariable, plus per-occurrence membership:
+        # each CVariable occurrence names the SSA value (vvar id) it renders, and
+        # that value's op-graph varnode becomes an instance of this variable's
+        # HighVariable. A varnode belongs to at most one variable (claimed).
+        claimed: set[int] = set()
         param_index = 0
         for _text, obj in codegen.cfunc.c_repr_chunks(indent=0):
             if type(obj).__name__ != "CVariable":
                 continue
             var = obj.variable
-            if var is None or id(var) in self.by_var_id:
+            if var is None or id(var) in self._skipped:
                 continue
-            # display name comes from the unified variable (what tokens show, and
-            # where renames land); fall back to the raw variable name
-            uv = obj.unified_variable
-            name = (getattr(uv, "name", None) if uv is not None else None) \
-                or getattr(var, "name", None) or f"var_{len(self.symbols)}"
-            ident = getattr(var, "ident", "") or ""
-            is_param = isinstance(var, SimRegisterVariable) and ident.startswith("arg_")
+            sym = self.by_var_id.get(id(var))
+            if sym is None:
+                sym, param_index = self._make_symbol(obj, var, arch, param_index)
+                if sym is None:
+                    self._skipped.add(id(var))
+                    continue
+                self.by_var_id[id(var)] = sym
+                self.symbols.append(sym)
+            if translator is not None:
+                occ = translator.occurrence_ref(
+                    getattr(obj, "vvar_id", None), sym.storage_kind, sym.offset)
+                if occ is not None and occ not in claimed:
+                    claimed.add(occ)
+                    sym.member_refs.append(occ)
 
-            if isinstance(var, SimStackVariable):
-                type_name, type_size = undef_type_for_size(var.size)
-                sym = VarSymbol(
-                    sym_id=self._alloc_id(), name=name,
-                    category=-1, cat_index=-1,
-                    type_name=type_name, type_size=type_size,
-                    storage_kind=STACK, space=0, offset=var.offset, size=var.size,
-                )
-            elif isinstance(var, SimRegisterVariable):
-                reg_name = arch.translate_register_name(var.reg, var.size)
-                try:
-                    off, size = self._resolve_register(reg_name.upper())
-                except Exception:
-                    continue  # register angr uses but Ghidra doesn't name; skip
-                type_name, type_size = undef_type_for_size(var.size)
-                cat = 0 if is_param else -1
-                cidx = param_index if is_param else -1
-                if is_param:
-                    param_index += 1
-                sym = VarSymbol(
-                    sym_id=self._alloc_id(), name=name,
-                    category=cat, cat_index=cidx,
-                    type_name=type_name, type_size=type_size,
-                    storage_kind=REGISTER, space=self.space_register,
-                    offset=off, size=var.size,
-                )
-            else:
-                continue  # skip globals/memory vars for now
-
-            # the representative varnode links tokens/HighVariables into the op
-            # graph: reuse the op-graph varnode at this storage when available
-            if self._translator is not None:
-                sym.varnode_ref = self._translator.variable_representative(
+        # second pass: pick each symbol's representative. A symbol whose
+        # occurrences resolved uses its first instance; otherwise fall back to
+        # the storage's op-graph varnode -- unless another variable claimed it,
+        # in which case mint a fresh varnode so the two highs stay disjoint.
+        for sym in self.symbols:
+            if sym.member_refs:
+                sym.varnode_ref = sym.member_refs[0]
+            elif translator is not None:
+                rep = translator.variable_representative(
                     sym.storage_kind, sym.offset, sym.size)
+                if rep in claimed:
+                    rep = translator.new_storage_varnode(
+                        sym.storage_kind, sym.offset, sym.size)
+                claimed.add(rep)
+                sym.varnode_ref = rep
+                sym.member_refs.append(rep)
             else:
                 sym.varnode_ref = self._next_ref
                 self._next_ref += 1
-            self.by_var_id[id(var)] = sym
-            self.symbols.append(sym)
+                sym.member_refs.append(sym.varnode_ref)
+
+    def _make_symbol(self, obj, var, arch, param_index: int):
+        from angr.sim_variable import SimRegisterVariable, SimStackVariable
+
+        # display name comes from the unified variable (what tokens show, and
+        # where renames land); fall back to the raw variable name
+        uv = obj.unified_variable
+        name = (getattr(uv, "name", None) if uv is not None else None) \
+            or getattr(var, "name", None) or f"var_{len(self.symbols)}"
+        ident = getattr(var, "ident", "") or ""
+        is_param = isinstance(var, SimRegisterVariable) and ident.startswith("arg_")
+
+        if isinstance(var, SimStackVariable):
+            type_name, type_size = undef_type_for_size(var.size)
+            return VarSymbol(
+                sym_id=self._alloc_id(), name=name,
+                category=-1, cat_index=-1,
+                type_name=type_name, type_size=type_size,
+                storage_kind=STACK, space=0, offset=var.offset, size=var.size,
+            ), param_index
+        if isinstance(var, SimRegisterVariable):
+            reg_name = arch.translate_register_name(var.reg, var.size)
+            try:
+                off, size = self._resolve_register(reg_name.upper())
+            except Exception:
+                return None, param_index  # register Ghidra doesn't name; skip
+            type_name, type_size = undef_type_for_size(var.size)
+            cat = 0 if is_param else -1
+            cidx = param_index if is_param else -1
+            if is_param:
+                param_index += 1
+            return VarSymbol(
+                sym_id=self._alloc_id(), name=name,
+                category=cat, cat_index=cidx,
+                type_name=type_name, type_size=type_size,
+                storage_kind=REGISTER, space=self.space_register,
+                offset=off, size=var.size,
+            ), param_index
+        return None, param_index  # skip globals/memory vars for now
 
     def symref_for(self, var) -> int | None:
         sym = self.by_var_id.get(id(var))

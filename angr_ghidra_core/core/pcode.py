@@ -104,8 +104,11 @@ class PcodeTranslator:
         self.ops: list[Op] = []
         self.blocks: list[Block] = []
         self._vvar_ref: dict[int, int] = {}     # varid -> varnode ref
+        self._by_ref: dict[int, Varnode] = {}    # varnode ref -> Varnode
         self._stack_rep: dict[int, int] = {}     # stack offset -> representative ref
         self._reg_rep: dict[int, int] = {}       # ghidra reg offset -> representative ref
+        self._stack_members: dict[int, list[int]] = {}  # stack offset -> all refs there
+        self._reg_members: dict[int, list[int]] = {}    # ghidra reg offset -> all refs
         self._next_ref = 0x300                   # varnode create-index namespace
         self._next_time = 1
         self._next_unique = 0x10000000
@@ -115,7 +118,9 @@ class PcodeTranslator:
     def _new_varnode(self, space, offset, size) -> int:
         ref = self._next_ref
         self._next_ref += 1
-        self.varnodes.append(Varnode(ref, space, offset, size))
+        vn = Varnode(ref, space, offset, size)
+        self.varnodes.append(vn)
+        self._by_ref[ref] = vn
         return ref
 
     def _const(self, value, size) -> int:
@@ -134,6 +139,7 @@ class PcodeTranslator:
         if vvar.was_stack:
             ref = self._new_varnode(SPACE_STACK, vvar.stack_offset, size)
             self._stack_rep.setdefault(vvar.stack_offset, ref)
+            self._stack_members.setdefault(vvar.stack_offset, []).append(ref)
         elif vvar.was_reg or _is_register(vvar):
             reg_off = _reg_offset(vvar)
             g_off = self._reg_lookup(reg_off, size) if reg_off is not None else None
@@ -142,6 +148,7 @@ class PcodeTranslator:
             else:
                 ref = self._new_varnode(SPACE_REGISTER, g_off, size)
                 self._reg_rep.setdefault(g_off, ref)
+                self._reg_members.setdefault(g_off, []).append(ref)
         else:
             ref = self._temp(size)
         self._vvar_ref[vid] = ref
@@ -163,12 +170,40 @@ class PcodeTranslator:
             if rep is None:
                 rep = self._new_varnode(SPACE_STACK, offset, size)
                 self._stack_rep[offset] = rep
+                self._stack_members.setdefault(offset, []).append(rep)
             return rep
         rep = self._reg_rep.get(offset)
         if rep is None:
             rep = self._new_varnode(SPACE_REGISTER, offset, size)
             self._reg_rep[offset] = rep
+            self._reg_members.setdefault(offset, []).append(rep)
         return rep
+
+    def new_storage_varnode(self, storage_kind: str, offset: int, size: int) -> int:
+        """A fresh (op-less) varnode at a storage location, for a variable that
+        needs its own representative because another variable already claimed
+        the existing varnodes there."""
+        if storage_kind == "stack":
+            ref = self._new_varnode(SPACE_STACK, offset, size)
+            self._stack_members.setdefault(offset, []).append(ref)
+        else:
+            ref = self._new_varnode(SPACE_REGISTER, offset, size)
+            self._reg_members.setdefault(offset, []).append(ref)
+        return ref
+
+    def occurrence_ref(self, varid, storage_kind: str, offset: int) -> int | None:
+        """Varnode ref for one SSA occurrence (an AIL vvar id), provided it lives
+        at the given storage -- so a token's varref can point at the exact SSA
+        value it renders rather than the variable's representative."""
+        if varid is None:
+            return None
+        ref = self._vvar_ref.get(varid)
+        if ref is None:
+            return None
+        vn = self._by_ref.get(ref)
+        if vn is not None and vn.space == storage_kind and vn.offset == offset:
+            return ref
+        return None
 
     def ops_by_block(self, block):
         """Ops belonging to a block, in order (by their time)."""

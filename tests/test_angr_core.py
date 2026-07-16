@@ -112,19 +112,26 @@ def test_ast_highlist_and_varref_chain(angr_session):
         sym = sym_by_id[h.symref]
         assert h.high_class == ("p" if sym.category == 0 else "l")
 
-    # every variable-token varref -> varnode -> high -> symbol
-    high_by_repref = hf.high_by_repref
+    # every variable-token varref -> varnode -> high -> symbol. Tokens carry
+    # per-occurrence varrefs (the SSA value they render), so the varref must be
+    # an *instance* (member) of exactly one HighVariable -- Ghidra only sets
+    # varnode.getHigh() on the instances listed in <high>.
+    high_by_member = {}
+    for h in hf.highs:
+        for m in h.members:
+            assert m not in high_by_member, f"varnode {m} in two HighVariables"
+            high_by_member[m] = h
     refs = res.token_attr("varref")
     assert refs, "expected variable tokens to carry varref links"
     for r in refs:
         assert r in vn_by_ref, f"varref {r} has no varnode"
-        assert r in high_by_repref, f"varnode {r} has no HighVariable"
-        assert high_by_repref[r].symref in sym_by_id
+        assert r in high_by_member, f"varnode {r} is not an instance of any HighVariable"
+        assert high_by_member[r].symref in sym_by_id
 
-    # per-occurrence identity: a variable used N>1 times shares one varref
+    # occurrence identity: a value used N>1 times shares one varref
     from collections import Counter
     counts = Counter(refs)
-    assert any(c > 1 for c in counts.values()), "expected a variable used more than once"
+    assert any(c > 1 for c in counts.values()), "expected a value used more than once"
 
 
 def test_return_storage_is_valid(angr_session):

@@ -193,12 +193,21 @@ Beyond stage 3 (text-level decompilation through the real protocol):
   headless Ghidra (`ghidra_validation/NavTest.java`, RESULT PASS); coverage is
   bounded by angr's AIL being coarser than the machine listing.
 
+- **[done] Per-token varref.** Variable tokens now reference the varnode of the
+  exact SSA value they render (via `CVariable.vvar_id` → the op-graph varnode),
+  not one shared representative per variable — so def/use highlighting and
+  slices are per-occurrence-accurate. Each HighVariable lists all of its SSA
+  values as instances (disjoint across variables, even when storage is shared),
+  so every token still resolves token → varnode → HighVariable → HighSymbol.
+  This is the prerequisite for consuming DynamicHash-stored edits (SSA-local
+  renames), which Ghidra can now store against the right varnode.
+
 Remaining, in planned order:
 
-1. **Per-token varref + fuller slicing.** Each token occurrence still references
-   one representative varnode per variable, so slices are partial. Map each token
-   to its AIL def (via `cnode2ailexpr`) and emit per-occurrence `varref`; this
-   also unblocks DynamicHash-stored edits (SSA-local renames).
+1. **DynamicHash edit consumption.** Renames/retypes of non-addr-tied (register/
+   SSA) locals come back as `<hash>` symbols; port Ghidra's `DynamicHash` over
+   our op graph to match them to varnodes. Deeper slices also want true
+   LOAD/STORE lowering (memory def-use is currently approximated by COPY).
 2. **Coverage + hybrid routing.** `normalize`/`paramid` styles, `generateSignatures`
    and `structureGraph` routed to the C++ core; option plumbing; performance.
 3. **Scale validation** against the C++ core across a large corpus.

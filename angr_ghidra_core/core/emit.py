@@ -157,7 +157,7 @@ class ResponseEmitter:
         # the varnodes must be registered before the highlist references them.
         if var_table is not None and var_table.symbols:
             self._emit_ast(enc, var_table, translator)
-            self._emit_highlist(enc, var_table)
+            self._emit_highlist(enc, var_table, translator)
 
         enc.open_element(ids.ELEM_PROTOTYPE)
         enc.write_string(ids.ATTRIB_EXTRAPOP, "unknown")
@@ -280,10 +280,12 @@ class ResponseEmitter:
             enc.close_element(ids.ELEM_ADDR)
         enc.close_element(ids.ELEM_OP)
 
-    def _emit_highlist(self, enc: PackedEncoder, var_table) -> None:
+    def _emit_highlist(self, enc: PackedEncoder, var_table, translator=None) -> None:
         """One <high> per variable (HighLocal / HighParam): symref links to the
-        LocalSymbolMap symbol, repref + a member varnode reference the AST
-        varnode, so token varrefs resolve to a HighVariable."""
+        LocalSymbolMap symbol, repref + the member varnodes reference the AST
+        varnodes. Every SSA value that renders as this variable is listed as an
+        instance (only instances get their high set on decode), so per-occurrence
+        token varrefs resolve token -> varnode -> HighVariable -> HighSymbol."""
         enc.open_element(ids.ELEM_HIGHLIST)
         for sym in var_table.symbols:
             enc.open_element(ids.ELEM_HIGH)
@@ -292,10 +294,10 @@ class ResponseEmitter:
             enc.write_unsigned(ids.ATTRIB_REPREF, sym.varnode_ref)
             # datatype (decodeInstances reads it right after repref)
             self._typeref(enc, sym.type_name)
-            # member varnode(s): reference the representative by ref
-            enc.open_element(ids.ELEM_ADDR)
-            enc.write_unsigned(ids.ATTRIB_REF, sym.varnode_ref)
-            enc.close_element(ids.ELEM_ADDR)
+            for ref in (sym.member_refs or [sym.varnode_ref]):
+                enc.open_element(ids.ELEM_ADDR)
+                enc.write_unsigned(ids.ATTRIB_REF, ref)
+                enc.close_element(ids.ELEM_ADDR)
             enc.close_element(ids.ELEM_HIGH)
         enc.close_element(ids.ELEM_HIGHLIST)
 
@@ -334,7 +336,15 @@ class ResponseEmitter:
             if type(obj).__name__ == "CVariable" and var_table is not None:
                 sym = var_table.by_var_id.get(id(obj.variable))
                 if sym is not None:
+                    # prefer the varnode of this exact SSA occurrence (fuller
+                    # slices: its def/uses are this occurrence's, not the
+                    # representative's); fall back to the representative
                     varref = sym.varnode_ref
+                    if translator is not None:
+                        occ = translator.occurrence_ref(
+                            getattr(obj, "vvar_id", None), sym.storage_kind, sym.offset)
+                        if occ is not None and occ in sym.member_refs:
+                            varref = occ
             # opref links the token to the p-code op at its instruction address,
             # so token.getMinAddress() resolves and listing<->decompiler
             # navigation works
