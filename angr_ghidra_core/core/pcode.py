@@ -176,6 +176,17 @@ class PcodeTranslator:
             self._ops_by_time = {op.time: op for op in self.ops}
         return [self._ops_by_time[t] for t in block.op_times if t in self._ops_by_time]
 
+    def op_time_at(self, ins_addr: int) -> int | None:
+        """The (op) time of a representative op at an instruction address, for
+        linking C tokens to the p-code op so navigation resolves the address."""
+        if not hasattr(self, "_op_at_addr"):
+            m: dict[int, int] = {}
+            for op in self.ops:
+                if op.ins_addr:
+                    m.setdefault(op.ins_addr, op.time)
+            self._op_at_addr = m
+        return self._op_at_addr.get(ins_addr)
+
     # ------------------------------------------------------------ ops
 
     def _emit(self, opcode, ins_addr, output, inputs, space_input=None) -> int:
@@ -188,6 +199,9 @@ class PcodeTranslator:
 
     def _expr(self, e, ins_addr) -> int:
         """Return a varnode ref holding the value of expression e."""
+        # ops take the expression's own instruction address when it has one, so
+        # C tokens (which carry the expression's address) link to a matching op
+        ins_addr = _ins_addr(e) or ins_addr
         cls = _cls(e)
         if cls == "VirtualVariable":
             return self._vvar(e)

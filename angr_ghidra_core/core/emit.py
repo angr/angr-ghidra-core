@@ -58,7 +58,7 @@ class ResponseEmitter:
         enc = PackedEncoder()
         enc.open_element(ids.ELEM_DOC)
         self._emit_model_function(enc, name, entry, size, var_table, translator)
-        self._emit_markup_function(enc, codegen, var_table)
+        self._emit_markup_function(enc, codegen, var_table, translator)
         enc.close_element(ids.ELEM_DOC)
         return enc.to_bytes()
 
@@ -321,7 +321,8 @@ class ResponseEmitter:
 
     # ---- markup <function>: the Clang token tree ----
 
-    def _emit_markup_function(self, enc: PackedEncoder, codegen, var_table) -> None:
+    def _emit_markup_function(self, enc: PackedEncoder, codegen, var_table,
+                              translator=None) -> None:
         enc.open_element(ids.ELEM_FUNCTION)
         # flatten the codegen chunk stream into syntax/variable/type/... tokens,
         # turning embedded newlines into <break> elements with indentation.
@@ -334,6 +335,14 @@ class ResponseEmitter:
                 sym = var_table.by_var_id.get(id(obj.variable))
                 if sym is not None:
                     varref = sym.varnode_ref
+            # opref links the token to the p-code op at its instruction address,
+            # so token.getMinAddress() resolves and listing<->decompiler
+            # navigation works
+            opref = None
+            if translator is not None:
+                ia = (getattr(obj, "tags", None) or {}).get("ins_addr")
+                if ia is not None:
+                    opref = translator.op_time_at(ia)
             segments = text.split("\n")
             for i, seg in enumerate(segments):
                 if i > 0:
@@ -345,7 +354,7 @@ class ResponseEmitter:
                     seg = stripped
                 if not seg:
                     continue
-                self._emit_token(enc, seg, color, varref)
+                self._emit_token(enc, seg, color, varref, opref)
         enc.close_element(ids.ELEM_FUNCTION)
 
     def _emit_type_token(self, enc: PackedEncoder, text: str) -> None:
@@ -367,21 +376,32 @@ class ResponseEmitter:
                 enc.close_element(ids.ELEM_SYNTAX)
 
     def _emit_token(self, enc: PackedEncoder, text: str, color: int | None,
-                    varref: int | None = None) -> None:
+                    varref: int | None = None, opref: int | None = None) -> None:
         if color == VARIABLE_COLOR:
             enc.open_element(ids.ELEM_VARIABLE)
             enc.write_unsigned(ids.ATTRIB_COLOR, color)
             if varref is not None:
                 enc.write_unsigned(ids.ATTRIB_VARREF, varref)
+            if opref is not None:
+                enc.write_unsigned(ids.ATTRIB_OPREF, opref)
             enc.write_string(ids.ATTRIB_CONTENT, text)
             enc.close_element(ids.ELEM_VARIABLE)
         elif color == FUNCTION_COLOR:
             enc.open_element(ids.ELEM_FUNCNAME)
             enc.write_unsigned(ids.ATTRIB_COLOR, color)
+            if opref is not None:
+                enc.write_unsigned(ids.ATTRIB_OPREF, opref)
             enc.write_string(ids.ATTRIB_CONTENT, text)
             enc.close_element(ids.ELEM_FUNCNAME)
         elif color == TYPE_COLOR:
             self._emit_type_token(enc, text)
+        elif color is None and opref is not None:
+            # a plain-syntax token with an instruction address: emit it as an
+            # <op> (ClangOpToken) so it carries opref and navigates to that address
+            enc.open_element(ids.ELEM_OP)
+            enc.write_unsigned(ids.ATTRIB_OPREF, opref)
+            enc.write_string(ids.ATTRIB_CONTENT, text)
+            enc.close_element(ids.ELEM_OP)
         elif color is None:
             enc.open_element(ids.ELEM_SYNTAX)
             enc.write_string(ids.ATTRIB_CONTENT, text)
