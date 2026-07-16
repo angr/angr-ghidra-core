@@ -174,20 +174,28 @@ Beyond stage 3 (text-level decompilation through the real protocol):
   The whole chain is now confirmed end-to-end against a running headless Ghidra
   (see "Validated against real Ghidra" above).
 
+- **[done] Edit round-trip + types.** Variable renames/retypes committed in the
+  GUI round-trip: locked localdb symbols are matched by storage and applied to
+  angr's variables (rename → unified name; retype → manual type + re-decompile).
+  Stack varnodes are marked addr-tied so Ghidra stores edits as fixed `<addr>`
+  rather than DynamicHash. Ghidra datatypes ↔ `SimType` mapping.
+- **[done] P-code op graph.** The `<ast>` now carries a real p-code def-use graph
+  (`<block>`/`<op>`/`<blockedge>`) lowered from angr's AIL. Verified against real
+  Ghidra: the HighFunction has p-code ops and basic blocks, and forward/backward
+  slicing (`DecompilerUtils.getForwardSlice`) returns non-trivial slices. It's a
+  best-effort data-flow lowering (see `core/pcode.py`); per-occurrence `opref`
+  links (for fuller slices and DynamicHash edits) are the remaining refinement.
+
 Remaining, in planned order:
 
-1. **P-code op graph for slicing.** The AST currently has varnodes but no basic
-   blocks / p-code ops, so forward/backward slicing (which walks the def-use
-   graph) isn't available yet. Emit `<block>`/`<op>`/`<blockedge>` from angr's
-   AIL and add `opref` links on tokens. This is the largest remaining piece
-   (AIL → p-code triples) and needs validation against a running Ghidra.
-2. **Edit round-trip + types.** Consume DB renames/retypes/prototype overrides
-   from callbacks into angr KB overrides; map `getDataType` to `SimType`.
-   Nail the exact stack-offset convention (angr bp-relative → Ghidra stack space)
-   so rename/retype write-back targets the right variable.
-3. **Coverage + hybrid routing.** `normalize`/`paramid` styles, `generateSignatures`
+1. **Per-token op links + fuller slicing.** Each token occurrence references one
+   representative varnode per variable, so slices are partial. Map each token to
+   its AIL def (via `cnode2ailexpr`) and emit per-occurrence `varref`/`opref`;
+   this also unblocks DynamicHash-stored edits (SSA-local renames).
+2. **Coverage + hybrid routing.** `normalize`/`paramid` styles, `generateSignatures`
    and `structureGraph` routed to the C++ core; option plumbing; performance.
-4. **Scale validation** against the C++ core across a large corpus.
+3. **Scale validation** against the C++ core across a large corpus.
+4. **Multi-architecture** beyond x86-64.
 
 ## Layout
 
