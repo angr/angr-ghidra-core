@@ -183,15 +183,22 @@ Beyond stage 3 (text-level decompilation through the real protocol):
   (`<block>`/`<op>`/`<blockedge>`) lowered from angr's AIL. Verified against real
   Ghidra: the HighFunction has p-code ops and basic blocks, and forward/backward
   slicing (`DecompilerUtils.getForwardSlice`) returns non-trivial slices. It's a
-  best-effort data-flow lowering (see `core/pcode.py`); per-occurrence `opref`
-  links (for fuller slices and DynamicHash edits) are the remaining refinement.
+  best-effort data-flow lowering (see `core/pcode.py`).
+- **[done] Listing ↔ decompiler navigation.** Each C token carries an `opref` to
+  the p-code op at its instruction, so both directions work through Ghidra's
+  standard machinery: `ClangToken.getMinAddress()` moves the listing cursor from
+  a clicked token, and `DecompilerUtils.getTokensFromView` highlights the tokens
+  for a selected instruction. Op seqnums are stamped with each expression's own
+  `ins_addr` so per-expression tokens find a matching op. Verified against real
+  headless Ghidra (`ghidra_validation/NavTest.java`, RESULT PASS); coverage is
+  bounded by angr's AIL being coarser than the machine listing.
 
 Remaining, in planned order:
 
-1. **Per-token op links + fuller slicing.** Each token occurrence references one
-   representative varnode per variable, so slices are partial. Map each token to
-   its AIL def (via `cnode2ailexpr`) and emit per-occurrence `varref`/`opref`;
-   this also unblocks DynamicHash-stored edits (SSA-local renames).
+1. **Per-token varref + fuller slicing.** Each token occurrence still references
+   one representative varnode per variable, so slices are partial. Map each token
+   to its AIL def (via `cnode2ailexpr`) and emit per-occurrence `varref`; this
+   also unblocks DynamicHash-stored edits (SSA-local renames).
 2. **Coverage + hybrid routing.** `normalize`/`paramid` styles, `generateSignatures`
    and `structureGraph` routed to the C++ core; option plumbing; performance.
 3. **Scale validation** against the C++ core across a large corpus.
