@@ -18,7 +18,7 @@ from ..ghidra_wire.address import Addr, encode_addr
 from ..ghidra_wire.dump import parse_tree
 from ..ghidra_wire.packed import PackedDecoder, PackedEncoder
 from ..ghidra_wire.server import ServerTransport
-from .edits import apply_renames, apply_retypes, parse_user_edits
+from .edits import apply_renames, apply_retypes, parse_user_edits, resolve_hash_edits
 from .emit import ResponseEmitter
 from .prototypes import (
     ghidra_type_to_sim,
@@ -323,6 +323,12 @@ class AngrCore:
         if edits:
             reg_to_angr = self._reg_to_angr(arch)
             try:
+                # dynamic-hash edits identify a varnode by a hash of its local
+                # def-use neighborhood; Ghidra computed it over the op graph of
+                # the previous (identical) decompilation, so resolve it against
+                # this one and turn it into a plain storage edit
+                if any(e.hash_val is not None for e in edits):
+                    resolve_hash_edits(edits, self._build_pcode(dec.ail_graph, arch))
                 # retypes are ground-truth: set them then re-decompile so angr's
                 # type inference honours them
                 retyped = apply_retypes(dec.codegen, edits, vkb.variables[entry],

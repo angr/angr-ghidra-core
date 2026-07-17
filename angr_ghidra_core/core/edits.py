@@ -27,6 +27,11 @@ class UserEdit:
     stack_offset: int | None  # signed stack offset, if stack storage
     reg_offset: int | None    # register-space offset, if register storage
     size: int
+    # dynamic-hash storage (edits on varnodes with no stable address): the
+    # DynamicHash value and the op address it was anchored to. Resolved to a
+    # stack/register storage against the op graph by resolve_hash_edits().
+    hash_val: int | None = None
+    pc_addr: int | None = None
 
 
 def parse_user_edits(fn_el) -> list[UserEdit]:
@@ -49,16 +54,29 @@ def parse_user_edits(fn_el) -> list[UserEdit]:
         if not (namelock or typelock):
             continue  # only honour user-locked edits
         addr_el = next((c for c in mapsym.children if c.name == "addr"), None)
-        if addr_el is None:
-            continue  # dynamic-hash storage needs the p-code op graph; skip
-        space = addr_el.attr("space")
-        offset = addr_el.attr("offset") or 0
-        size = addr_el.attr("size") or 0
         stack_off = reg_off = None
-        if isinstance(space, SpecialSpace):  # stack special space
-            stack_off = offset - _U64 if offset >= (_U64 >> 1) else offset
-        elif isinstance(space, int):  # register (or ram) space index
-            reg_off = offset
+        hash_val = pc_addr = None
+        size = 0
+        if addr_el is not None:
+            space = addr_el.attr("space")
+            offset = addr_el.attr("offset") or 0
+            size = addr_el.attr("size") or 0
+            if isinstance(space, SpecialSpace):  # stack special space
+                stack_off = offset - _U64 if offset >= (_U64 >> 1) else offset
+            elif isinstance(space, int):  # register (or ram) space index
+                reg_off = offset
+        else:
+            # dynamic-hash storage: <hash val> + a rangelist whose first range
+            # carries the anchor op address (SymbolEntry.encodeRangelist)
+            hash_el = mapsym.first("hash")
+            if hash_el is None:
+                continue
+            hash_val = hash_el.attr("val") or 0
+            rangelist = mapsym.first("rangelist")
+            rng = rangelist.first("range") if rangelist is not None else None
+            if rng is None:
+                continue
+            pc_addr = rng.attr("first") or 0
         tel = sym.first("type") or sym.first("typeref")
         edits.append(UserEdit(
             name=sym.attr("name") if namelock else None,
@@ -66,8 +84,42 @@ def parse_user_edits(fn_el) -> list[UserEdit]:
             stack_offset=stack_off,
             reg_offset=reg_off,
             size=size,
+            hash_val=hash_val,
+            pc_addr=pc_addr,
         ))
     return edits
+
+
+def resolve_hash_edits(edits, translator) -> int:
+    """Resolve dynamic-hash edits to a concrete storage using the op graph:
+    recompute Ghidra's DynamicHash over our own p-code and find the varnode the
+    stored (address, hash) pair identifies. Returns the number resolved; the
+    matched varnode's storage is written into the edit so the normal
+    rename/retype path applies it."""
+    from .dynahash import DynamicHasher
+
+    pending = [e for e in edits if e.hash_val is not None and e.pc_addr is not None]
+    if not pending or translator is None:
+        return 0
+    hasher = DynamicHasher(translator)
+    resolved = 0
+    for edit in pending:
+        ref = hasher.find_varnode(edit.pc_addr, edit.hash_val)
+        if ref is None:
+            continue
+        vn = translator._by_ref.get(ref)
+        if vn is None:
+            continue
+        if vn.space == "stack":
+            edit.stack_offset = vn.offset
+        elif vn.space == "register":
+            edit.reg_offset = vn.offset
+        else:
+            continue  # a pure temporary: no storage to map back to a variable
+        if not edit.size:
+            edit.size = vn.size
+        resolved += 1
+    return resolved
 
 
 def storage_to_unified(codegen, reg_to_angr):

@@ -202,12 +202,21 @@ Beyond stage 3 (text-level decompilation through the real protocol):
   This is the prerequisite for consuming DynamicHash-stored edits (SSA-local
   renames), which Ghidra can now store against the right varnode.
 
+- **[done] DynamicHash edit consumption.** Edits on variables with no stable
+  storage address (SSA temporaries, non-addr-tied stack) are stored by Ghidra as
+  a 64-bit hash of the varnode's local def-use neighborhood and come back as
+  `<hash>` symbols. `core/dynahash.py` is a faithful port of Ghidra's
+  `DynamicHash` (CRC neighborhood hash, edge ordering, candidate gathering,
+  method cycling) over our op graph: the stored (address, hash) pair resolves to
+  the varnode, whose storage feeds the normal rename/retype path. Validated
+  end-to-end against real Ghidra: a hash computed by Ghidra's own `DynamicHash`
+  over our emitted graph, stored as a hash-storage DB local, round-trips into
+  the C output (`ghidra_validation/HashEditRoundTrip.java`).
+
 Remaining, in planned order:
 
-1. **DynamicHash edit consumption.** Renames/retypes of non-addr-tied (register/
-   SSA) locals come back as `<hash>` symbols; port Ghidra's `DynamicHash` over
-   our op graph to match them to varnodes. Deeper slices also want true
-   LOAD/STORE lowering (memory def-use is currently approximated by COPY).
+1. **True LOAD/STORE lowering.** Memory def-use is currently approximated by
+   COPY (no space-id inputs); real LOAD/STORE ops would deepen slices further.
 2. **Coverage + hybrid routing.** `normalize`/`paramid` styles, `generateSignatures`
    and `structureGraph` routed to the C++ core; option plumbing; performance.
 3. **Scale validation** against the C++ core across a large corpus.
