@@ -28,6 +28,7 @@ import hashlib
 import logging
 import os
 import tempfile
+import threading
 
 log = logging.getLogger("angr_ghidra_core")
 
@@ -85,52 +86,52 @@ def probe_image(get_bytes, entry: int, max_size: int) -> tuple[int, bytes] | Non
     return base, content
 
 
-def image_hash(base: int, content: bytes) -> str:
+def image_hash(base: int, content: bytes, arch_name: str = "") -> str:
     h = hashlib.sha256()
     h.update(base.to_bytes(8, "little"))
+    h.update(arch_name.encode())
+    h.update(b"\0")
     h.update(content)
     return h.hexdigest()
 
 
 class ImageCache:
     """Builds/loads and memoizes whole-image `(project, cfg_model)` by content
-    hash. One instance per server (shared across protocol sessions)."""
+    hash. A single instance is shared across protocol sessions (and threads) in
+    the server; `get_bytes` and the arch are passed per call because they belong
+    to the calling session's program."""
 
-    def __init__(self, get_bytes, angr_arch, *, cache_dir: str | None = None,
+    def __init__(self, *, cache_dir: str | None = None,
                  max_size: int = DEFAULT_MAX_SIZE):
-        self._get_bytes = get_bytes
-        self._arch = angr_arch
         self._max_size = max_size
         self._dir = cache_dir or _default_cache_dir()
         self._mem: dict[str, tuple] = {}       # hash -> (project, cfg_model)
-        self._miss: set[int] = set()           # entries known too-big/unprobable
+        self._lock = threading.Lock()          # guards _mem and build/load
 
-    def get(self, entry: int):
+    def get(self, entry: int, get_bytes, angr_arch):
         """Return (project, cfg_model) for the image containing `entry`, or None
         to signal the caller should use the scoped path."""
-        if entry in self._miss:
-            return None
-        probed = probe_image(self._get_bytes, entry, self._max_size)
+        probed = probe_image(get_bytes, entry, self._max_size)
         if probed is None:
-            self._miss.add(entry)
             return None
         base, content = probed
-        h = image_hash(base, content)
-        if h in self._mem:
-            return self._mem[h]
-        try:
-            result = self._load_or_build(h, base, content)
-        except Exception:
-            log.exception("whole-image CFG failed; falling back to scoped mode")
-            self._miss.add(entry)
-            return None
-        self._mem[h] = result
-        return result
+        arch_name = getattr(angr_arch, "name", str(angr_arch))
+        h = image_hash(base, content, arch_name)
+        with self._lock:
+            if h in self._mem:
+                return self._mem[h]
+            try:
+                result = self._load_or_build(h, base, content, angr_arch)
+            except Exception:
+                log.exception("whole-image CFG failed; falling back to scoped mode")
+                return None
+            self._mem[h] = result
+            return result
 
     def _adb_path(self, h: str) -> str:
         return os.path.join(self._dir, f"{h}.adb")
 
-    def _load_or_build(self, h: str, base: int, content: bytes):
+    def _load_or_build(self, h: str, base: int, content: bytes, angr_arch):
         from angr.angrdb import AngrDB
 
         adb = self._adb_path(h)
@@ -145,7 +146,7 @@ class ImageCache:
                 log.exception("angrdb load failed for %s; rebuilding", h[:12])
 
         os.makedirs(self._dir, exist_ok=True)
-        proj, model, img_path = self._build(base, content)
+        proj, model, img_path = self._build(base, content, angr_arch)
         try:
             # angrdb re-reads the blob's backing file during dump, so it must
             # still exist here; the persisted db is self-contained afterwards
@@ -159,7 +160,7 @@ class ImageCache:
                 pass
         return proj, model
 
-    def _build(self, base: int, content: bytes):
+    def _build(self, base: int, content: bytes, angr_arch):
         import angr
 
         # the blob backend wants a path; angrdb re-reads that path at dump time,
@@ -169,7 +170,7 @@ class ImageCache:
         os.close(fd)
         proj = angr.Project(
             path,
-            main_opts={"backend": "blob", "arch": self._arch, "base_addr": base},
+            main_opts={"backend": "blob", "arch": angr_arch, "base_addr": base},
             auto_load_libs=False,
         )
         cfg = proj.analyses.CFGFast(normalize=True, force_complete_scan=False)

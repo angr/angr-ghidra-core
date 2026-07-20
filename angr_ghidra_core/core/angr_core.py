@@ -48,14 +48,18 @@ def clean_symbol_name(name: str) -> str:
 
 
 class AngrCore:
-    def __init__(self, transport: ServerTransport):
+    def __init__(self, transport: ServerTransport, image_cache: ImageCache | None = None,
+                 decompile_lock=None):
         self.t = transport
         self.spec: SpecInfo | None = None
         self.arch_id = 0
         self.action = "decompile"
         self._project_cache: dict = {}
         self._proto_cache: dict = {}  # callee addr -> recovered prototype (or None)
-        self._image_cache: ImageCache | None = None
+        # image cache and decompile lock are shared across sessions in the server;
+        # standalone (stdio) mode creates its own on demand
+        self._image_cache = image_cache
+        self._decompile_lock = decompile_lock
         self._image_disabled = False
 
     # ------------------------------------------------------------- main loop
@@ -98,6 +102,14 @@ class AngrCore:
         self.spec = parse_specs(pspec, cspec, tspec, coretypes)
         self.emitter = None
         return str(self.arch_id)
+
+    def _serialized(self):
+        """Context manager that serializes angr work across server sessions;
+        a no-op when running standalone (no shared lock)."""
+        if self._decompile_lock is not None:
+            return self._decompile_lock
+        from contextlib import nullcontext
+        return nullcontext()
 
     def _ensure_emitter(self) -> None:
         if self.emitter is not None:
@@ -151,21 +163,26 @@ class AngrCore:
         # this too). Returning them here is what makes *calls* to local functions
         # show arguments on later decompiles.
         if self.action == "paramid":
-            return self._paramid(entry, name, code)
+            with self._serialized():
+                return self._paramid(entry, name, code)
 
         # honour user edits (renames/retypes) committed to Ghidra's DB: they come
         # back in the localdb as locked symbols; apply them to angr's variables.
         edits = parse_user_edits(fn_el)
-        # fast path: decompile the function straight out of a cached whole-image
-        # CFG; fall back to a scoped load+CFG when the image is too big, the
-        # function isn't cleanly present, or anything goes wrong.
-        result = self._image_decompile(entry, name, edits)
-        if result is None:
-            result = self._decompile(entry, name, code, edits)
-        codegen, arch, func_size, ail_graph = result
-        translator = self._build_pcode(ail_graph, arch)
-        var_table = VariableSymbolTable(self._query_register, self.spec.space_register)
-        var_table.build(codegen, arch, translator)
+        # angr work (CFG, decompiler, p-code lowering) is not thread-safe, so
+        # serialize it across sessions in the server. Callbacks issued before this
+        # point go over this session's own socket and can run concurrently.
+        with self._serialized():
+            # fast path: decompile the function straight out of a cached
+            # whole-image CFG; fall back to a scoped load+CFG when the image is
+            # too big, the function isn't cleanly present, or anything goes wrong.
+            result = self._image_decompile(entry, name, edits)
+            if result is None:
+                result = self._decompile(entry, name, code, edits)
+            codegen, arch, func_size, ail_graph = result
+            translator = self._build_pcode(ail_graph, arch)
+            var_table = VariableSymbolTable(self._query_register, self.spec.space_register)
+            var_table.build(codegen, arch, translator)
         doc = self.emitter.emit_doc(name, entry, func_size, codegen, var_table, translator)
         dump = os.environ.get("ANGR_DUMP_RESPONSE")
         if dump:
@@ -375,8 +392,7 @@ class AngrCore:
                 max_size = int(os.environ.get("ANGR_GHIDRA_CFG_MAX_SIZE", DEFAULT_MAX_SIZE))
             except ValueError:
                 max_size = DEFAULT_MAX_SIZE
-            self._image_cache = ImageCache(
-                self._get_bytes, self.spec.angr_arch, max_size=max_size)
+            self._image_cache = ImageCache(max_size=max_size)
         return self._image_cache
 
     def _image_decompile(self, entry: int, name: str, edits=None):
@@ -388,7 +404,7 @@ class AngrCore:
         cache = self._get_image_cache()
         if cache is None:
             return None
-        got = cache.get(entry)
+        got = cache.get(entry, self._get_bytes, self.spec.angr_arch)
         if got is None:
             return None
         proj, cfg_model = got

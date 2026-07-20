@@ -82,16 +82,16 @@ def test_build_reload_decompiles(tmp_path):
     window = raw[:0x2000]
     mapping = {base + i * PAGE: window[i * PAGE:(i + 1) * PAGE] for i in range(2)}
 
-    cache = ImageCache(_pages(mapping), "AMD64", cache_dir=str(tmp_path))
-    got = cache.get(base + 0x600)
+    cache = ImageCache(cache_dir=str(tmp_path))
+    got = cache.get(base + 0x600, _pages(mapping), "AMD64")
     assert got is not None
     proj, model = got
     assert len(list(proj.kb.functions)) > 0
     assert model is not None
 
     # a second get for the same image is served from the in-process cache
-    got2 = cache.get(base + 0x600)
-    assert got2 is proj or got2[0] is proj
+    got2 = cache.get(base + 0x600, _pages(mapping), "AMD64")
+    assert got2[0] is proj
 
     # the angrdb file was written and reloads into a decompilable project
     adbs = list(tmp_path.glob("*.adb"))

@@ -44,20 +44,27 @@ class CoreException(Exception):
 class DecompClient:
     """Drive one decompiler core process."""
 
-    def __init__(self, exe_path, oracle, trace=None):
+    def __init__(self, exe_path, oracle, trace=None, streams=None):
         """exe_path: path to the core binary, or a list (argv) for a wrapped core
-        (e.g. ["python", "bin/angr-decompile"]).
+        (e.g. ["python", "bin/angr-decompile"]). Ignored when `streams` is given.
         oracle: object with query_<name>(decoder) -> reply methods.
-        trace: optional callable(direction: str, kind: str, payload) for logging."""
-        argv = [exe_path] if isinstance(exe_path, str) else list(exe_path)
-        self.proc = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        self.reader = BurstReader(self.proc.stdout)
-        self.writer = BurstWriter(self.proc.stdin)
+        trace: optional callable(direction: str, kind: str, payload) for logging.
+        streams: optional (read_stream, write_stream) to drive a core over an
+        existing pipe/socket instead of spawning a subprocess (e.g. the server)."""
+        if streams is not None:
+            self.proc = None
+            rfile, wfile = streams
+        else:
+            argv = [exe_path] if isinstance(exe_path, str) else list(exe_path)
+            self.proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            rfile, wfile = self.proc.stdout, self.proc.stdin
+        self.reader = BurstReader(rfile)
+        self.writer = BurstWriter(wfile)
         self.oracle = oracle
         self.trace = trace or (lambda *a: None)
         self.arch_id: str | None = None
@@ -234,14 +241,24 @@ class DecompClient:
 
     def close(self) -> None:
         try:
-            if self.arch_id is not None and self.proc.poll() is None:
+            alive = self.proc is None or self.proc.poll() is None
+            if self.arch_id is not None and alive:
                 self.deregister_program()
         except Exception:
             pass
         finally:
-            try:
-                self.proc.stdin.close()
-            except Exception:
-                pass
-            self.proc.terminate()
-            self.proc.wait(timeout=5)
+            if self.proc is not None:
+                try:
+                    self.proc.stdin.close()
+                except Exception:
+                    pass
+                self.proc.terminate()
+                self.proc.wait(timeout=5)
+            else:
+                # socket-backed: drop our streams so the server sees EOF
+                for f in (getattr(self.writer, "stream", None),
+                          getattr(self.reader, "stream", None)):
+                    try:
+                        f.close()
+                    except Exception:
+                        pass
