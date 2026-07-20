@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Wire-protocol unit tests. These import only angr_ghidra_core.ghidra_wire,
+  # which has no angr dependency, so this job is fast and always meaningful --
+  # it gates the packed-encoding / framing layer with nothing but pytest.
+  protocol:
+    name: Protocol tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip pytest
+      - run: PYTHONPATH=. pytest -q tests/test_packed.py
+
+  # The native launcher must compile.
+  launcher:
+    name: Launcher build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --manifest-path launcher/Cargo.toml
+
+  # The full Python suite. It needs the exact angr stack this project targets
+  # (angr master, version-locked at 9.3.0.dev0), which is built from source with
+  # its C (pyvex/VEX via CMake) and Rust (angr rustylib via setuptools-rust)
+  # extensions, plus the angr test-binaries corpus. Tests that cross-check
+  # against the C++ Ghidra core skip (that binary isn't built here).
+  full-suite:
+    name: Full test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+
+      - name: Install the angr stack (pinned to this project's dev tree)
+        run: |
+          set -eux
+          python -m pip install --upgrade pip setuptools setuptools-rust wheel cffi scikit-build-core
+          src="$RUNNER_TEMP/angr-src"
+          get() {  # $1 repo  $2 commit  (clone with submodules for pyvex's VEX)
+            git clone --recurse-submodules "https://github.com/angr/$1.git" "$src/$1"
+            git -C "$src/$1" checkout "$2"
+            git -C "$src/$1" submodule update --init --recursive
+          }
+          get archinfo 9462a9cfc9a8c8c1648e8d62e9773065e660d23c
+          get pyvex    121759e98ff88ab9335266d323ae5cae149167c9
+          get claripy  3ebec4f14a4b9e419acadd0bd374262307569cdc
+          get cle      421cd616aa83f349d928c060107bbddfbccb4356
+          get angr     656890235fbd19c029da765db5f0a36dce81934b
+          pip install "$src/archinfo"
+          pip install "$src/pyvex"
+          pip install "$src/claripy"
+          pip install "$src/cle"
+          # angr's build pins pyvex==9.3.0.dev0 (not on PyPI), so build against
+          # the versions we just installed rather than an isolated environment.
+          pip install --no-build-isolation "$src/angr"
+          pip install pypcode==4.0.0 pytest pytest-xdist
+
+      - name: Fetch the test-binaries corpus
+        run: |
+          git clone --depth 1 https://github.com/angr/binaries.git "$RUNNER_TEMP/binaries"
+          sudo mkdir -p /workspace
+          sudo ln -sfn "$RUNNER_TEMP/binaries" /workspace/binaries
+
+      - name: Run the suite
+        run: PYTHONPATH=. pytest -q -n auto
