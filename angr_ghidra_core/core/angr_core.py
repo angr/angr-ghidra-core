@@ -17,7 +17,7 @@ from ..ghidra_wire import ids
 from ..ghidra_wire.address import Addr, encode_addr
 from ..ghidra_wire.dump import parse_tree
 from ..ghidra_wire.packed import PackedDecoder, PackedEncoder
-from ..ghidra_wire.server import ServerTransport
+from ..ghidra_wire.server import CallbackException, ServerTransport
 from .edits import apply_renames, apply_retypes, parse_user_edits, resolve_hash_edits
 from .emit import ResponseEmitter
 from .prototypes import (
@@ -28,6 +28,7 @@ from .prototypes import (
 )
 from .spec import SpecInfo, parse_specs
 from .pcode import PcodeTranslator
+from .imagecache import ImageCache, DEFAULT_MAX_SIZE
 from .variables import VariableSymbolTable
 
 log = logging.getLogger("angr_ghidra_core")
@@ -54,6 +55,8 @@ class AngrCore:
         self.action = "decompile"
         self._project_cache: dict = {}
         self._proto_cache: dict = {}  # callee addr -> recovered prototype (or None)
+        self._image_cache: ImageCache | None = None
+        self._image_disabled = False
 
     # ------------------------------------------------------------- main loop
 
@@ -153,7 +156,13 @@ class AngrCore:
         # honour user edits (renames/retypes) committed to Ghidra's DB: they come
         # back in the localdb as locked symbols; apply them to angr's variables.
         edits = parse_user_edits(fn_el)
-        codegen, arch, func_size, ail_graph = self._decompile(entry, name, code, edits)
+        # fast path: decompile the function straight out of a cached whole-image
+        # CFG; fall back to a scoped load+CFG when the image is too big, the
+        # function isn't cleanly present, or anything goes wrong.
+        result = self._image_decompile(entry, name, edits)
+        if result is None:
+            result = self._decompile(entry, name, code, edits)
+        codegen, arch, func_size, ail_graph = result
         translator = self._build_pcode(ail_graph, arch)
         var_table = VariableSymbolTable(self._query_register, self.spec.space_register)
         var_table.build(codegen, arch, translator)
@@ -252,7 +261,13 @@ class AngrCore:
         enc.write_signed(ids.ATTRIB_SIZE, size)
         enc.close_element(ids.ELEM_ADDR)
         enc.close_element(ids.ELEM_COMMAND_GETBYTES)
-        kind, payload = self.t.query(enc)
+        try:
+            kind, payload = self.t.query(enc)
+        except CallbackException:
+            # Ghidra (or the oracle) signals an unreadable range with an
+            # exception frame rather than an empty reply; treat it as unmapped.
+            # The frame is fully consumed, so the transport stays usable.
+            return None
         if kind != "bytes" or not payload:
             return None
         return payload
@@ -321,26 +336,89 @@ class AngrCore:
             raise RuntimeError(f"angr produced no code for {name} @ {entry:#x}")
         arch = proj.arch
         if edits:
-            reg_to_angr = self._reg_to_angr(arch)
-            try:
-                # dynamic-hash edits identify a varnode by a hash of its local
-                # def-use neighborhood; Ghidra computed it over the op graph of
-                # the previous (identical) decompilation, so resolve it against
-                # this one and turn it into a plain storage edit
-                if any(e.hash_val is not None for e in edits):
-                    resolve_hash_edits(edits, self._build_pcode(dec.ail_graph, arch))
-                # retypes are ground-truth: set them then re-decompile so angr's
-                # type inference honours them
-                retyped = apply_retypes(dec.codegen, edits, vkb.variables[entry],
-                                        reg_to_angr, ghidra_type_to_sim, arch)
-                if retyped:
-                    dec = proj.analyses.Decompiler(func, cfg=cfg.model, variable_kb=vkb)
-                # renames only need a name swap + re-render
-                apply_renames(dec.codegen, edits, reg_to_angr)
-            except Exception:
-                log.exception("applying user edits failed")
+            dec = self._apply_edits(proj, func, cfg.model, vkb, dec, entry, arch, edits)
         func_size = func.size or len(code)
         return dec.codegen, arch, func_size, dec.ail_graph
+
+    def _apply_edits(self, proj, func, cfg_model, vkb, dec, entry, arch, edits):
+        """Apply user renames/retypes to a decompilation, re-decompiling when a
+        retype requires re-running type inference. Returns the (possibly new)
+        Decompiler analysis. Never raises."""
+        reg_to_angr = self._reg_to_angr(arch)
+        try:
+            # dynamic-hash edits identify a varnode by a hash of its local
+            # def-use neighborhood; Ghidra computed it over the op graph of the
+            # previous (identical) decompilation, so resolve it against this one
+            # and turn it into a plain storage edit
+            if any(e.hash_val is not None for e in edits):
+                resolve_hash_edits(edits, self._build_pcode(dec.ail_graph, arch))
+            # retypes are ground-truth: set them then re-decompile so angr's type
+            # inference honours them
+            retyped = apply_retypes(dec.codegen, edits, vkb.variables[entry],
+                                    reg_to_angr, ghidra_type_to_sim, arch)
+            if retyped:
+                dec = proj.analyses.Decompiler(func, cfg=cfg_model, variable_kb=vkb)
+            # renames only need a name swap + re-render
+            apply_renames(dec.codegen, edits, reg_to_angr)
+        except Exception:
+            log.exception("applying user edits failed")
+        return dec
+
+    def _get_image_cache(self) -> ImageCache | None:
+        if self._image_disabled:
+            return None
+        if os.environ.get("ANGR_GHIDRA_NO_IMAGE_CACHE"):
+            self._image_disabled = True
+            return None
+        if self._image_cache is None:
+            try:
+                max_size = int(os.environ.get("ANGR_GHIDRA_CFG_MAX_SIZE", DEFAULT_MAX_SIZE))
+            except ValueError:
+                max_size = DEFAULT_MAX_SIZE
+            self._image_cache = ImageCache(
+                self._get_bytes, self.spec.angr_arch, max_size=max_size)
+        return self._image_cache
+
+    def _image_decompile(self, entry: int, name: str, edits=None):
+        """Decompile `entry` directly out of the cached whole-image CFG. Returns
+        the usual (codegen, arch, size, ail_graph) tuple, or None to fall back to
+        the scoped path."""
+        from angr.knowledge_base import KnowledgeBase
+
+        cache = self._get_image_cache()
+        if cache is None:
+            return None
+        got = cache.get(entry)
+        if got is None:
+            return None
+        proj, cfg_model = got
+
+        func = proj.kb.functions.get(entry)
+        # only take the fast path for a clean, real function present at exactly
+        # Ghidra's entry -- otherwise the scoped path is the safe answer
+        if func is None or func.is_plt or func.is_simprocedure or func.is_alignment:
+            return None
+        try:
+            if func.size == 0 or not any(True for _ in func.blocks):
+                return None
+        except Exception:
+            return None
+        func.name = name
+
+        try:
+            self._name_call_targets(proj, func, entry, func.size)
+            vkb = KnowledgeBase(proj)
+            dec = proj.analyses.Decompiler(func, cfg=cfg_model, variable_kb=vkb)
+            if dec.codegen is None:
+                return None
+            arch = proj.arch
+            if edits:
+                dec = self._apply_edits(proj, func, cfg_model, vkb, dec, entry, arch, edits)
+            func_size = func.size
+            return dec.codegen, arch, func_size, dec.ail_graph
+        except Exception:
+            log.exception("whole-image decompile failed; falling back to scoped")
+            return None
 
     def _build_pcode(self, ail_graph, arch):
         """Translate the AIL graph into a Ghidra p-code op graph, or None on
@@ -411,9 +489,12 @@ class AngrCore:
     def _name_call_targets(self, proj, func, entry: int, size: int) -> None:
         """For each call target, create a named, returning function stub in angr's
         KB and give it the callee's prototype, so calls render with names AND
-        arguments. Targets lie outside the scoped blob, so the CFG doesn't
-        register them itself; we scan the function's call instructions. Name and
-        prototype both come from one getMappedSymbols query per target."""
+        arguments. In scoped mode targets lie outside the blob; in whole-image
+        mode the blob has no symbol/PLT info, so its CFG names them `sub_*` --
+        either way Ghidra is the authority for the name (resolving PLT thunks to
+        `strcmp`, `open`, ...) and the prototype. We scan the function's call
+        instructions; name and prototype come from one getMappedSymbols query per
+        target."""
         targets: set[int] = set()
         for block in func.blocks:
             try:
@@ -436,6 +517,11 @@ class AngrCore:
                 fn_el = None
             name = self._target_name(tgt, fn_el)
             stub = proj.kb.functions.function(addr=tgt, name=name, create=True)
+            # function(name=) does not rename an already-existing function, which
+            # is the common case in whole-image mode (PLT thunks were recovered as
+            # sub_* with bodies); set it explicitly so Ghidra's name wins
+            if stub.name != name:
+                stub.name = name
             # external stubs have no body; assume they return so the decompiler
             # emits normal call statements (not "/* do not return */")
             stub.returning = True
