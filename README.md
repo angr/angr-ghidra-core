@@ -90,6 +90,36 @@ unsigned int main(unsigned int a0, unsigned long long a1)
 
 ## Installing into a Ghidra tree
 
+### The easy way: the installer
+
+An installer handles everything — building the launcher, backing up Ghidra's
+original decompiler, dropping the launcher in, and writing the config:
+
+```bash
+# Linux / macOS
+./install.sh --ghidra /path/to/ghidra
+
+# Windows
+install.bat --ghidra C:\path\to\ghidra
+```
+
+If you don't already have a Python with `angr`, `pypcode` and `cle`, let the
+installer make one for you: add `--venv ~/angr-venv` (it creates the virtualenv
+and `pip install`s the dependencies). To point at an existing interpreter
+instead, use `--python /path/to/python`. Add `--server` to enable the faster
+shared-server mode. The install is reversible:
+
+```bash
+./install.sh --ghidra /path/to/ghidra --uninstall     # restores the original
+```
+
+The installer autodetects the platform's `os/<platform>/` directory and, if
+`--ghidra` is omitted, falls back to `$GHIDRA_INSTALL_DIR` (then a search of
+common locations on Unix). It needs a Rust toolchain (`cargo`) to build the
+launcher. **Restart Ghidra** afterwards.
+
+### The manual way
+
 Ghidra spawns an executable literally named `decompile` (`decompile.exe` on
 Windows) from `<ghidra>/Ghidra/Features/Decompiler/os/<platform>/`. The
 **`launcher/`** crate builds a small, zero-dependency native binary that stands in
