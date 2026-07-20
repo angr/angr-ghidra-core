@@ -22,6 +22,17 @@
 //!   log target    log          ANGR_GHIDRA_LOG        (off)
 //!   log raw io    log_io       ANGR_GHIDRA_LOG_IO     off
 //!   child env     env.NAME     (that var, if exported) inherited
+//!   server mode   server       ANGR_GHIDRA_SERVER     off
+//!   server socket server_socket ANGR_GHIDRA_SERVER_SOCKET  per-user temp path
+//!   server idle   server_idle  ANGR_GHIDRA_SERVER_IDLE   600 (seconds)
+//!   cfg max size  cfg_max_size ANGR_GHIDRA_CFG_MAX_SIZE  512000 (bytes)
+//!
+//! In **server mode** the launcher connects to a shared, long-lived angr server
+//! (starting it if absent) and proxies Ghidra's stdio to it over a local socket,
+//! instead of starting a fresh Python+angr process each time. This keeps the
+//! whole-image CFG cache warm across decompiles. On any connect/spawn failure it
+//! falls back to the direct per-call mode below. Enabling `log` also uses the
+//! direct mode so the debug log captures the core's stderr.
 //!
 //! No third-party crates: pure std for painless cross-compilation.
 
@@ -45,6 +56,15 @@ fn main() -> ! {
 
     let cfg = Config::load(&exe_dir);
     let logging = Logging::from_config(&cfg);
+
+    // Server mode: proxy to a shared long-lived angr server (starting it if
+    // needed). Skipped when a fallback binary is set or logging is on (which
+    // wants the core's own stderr). Returns only on failure -> direct mode.
+    let has_fallback = cfg.path("ANGR_GHIDRA_FALLBACK", "fallback").is_some();
+    if logging.is_none() && !has_fallback && cfg.flag("ANGR_GHIDRA_SERVER", "server") {
+        try_server_mode(&cfg, &exe_dir);
+        // fell through: server unavailable, continue to direct mode
+    }
 
     let mut plan: Vec<String> = Vec::new();
     plan.push(match &cfg.source {
@@ -285,6 +305,243 @@ fn hand_over(mut cmd: Command) -> ! {
             std::process::exit(127);
         }
     }
+}
+
+// --------------------------------------------------------------------------
+// Server mode: proxy Ghidra's stdio to a shared long-lived angr server
+// --------------------------------------------------------------------------
+
+/// Try to connect to (or start) the shared server and proxy stdio to it. On
+/// success this never returns (it exits with the session's status). On any
+/// setup failure it returns so the caller can use direct mode.
+fn try_server_mode(cfg: &Config, exe_dir: &Path) {
+    let socket_path = server_socket_path(cfg);
+    let idle = cfg
+        .scalar("ANGR_GHIDRA_SERVER_IDLE", "server_idle")
+        .unwrap_or_else(|| "600".to_string());
+
+    // one quick attempt to connect; if it fails, start a server and retry
+    if let Some(stream) = connect_socket(&socket_path) {
+        proxy_and_exit(stream);
+    }
+    if !spawn_server(cfg, exe_dir, &socket_path, &idle) {
+        return; // couldn't even launch a server -> direct mode
+    }
+    // the server races to bind; poll for it to come up (~10s)
+    for _ in 0..200 {
+        if let Some(stream) = connect_socket(&socket_path) {
+            proxy_and_exit(stream);
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // server never came up -> fall back to direct mode
+}
+
+/// Default per-user socket path (overridable). Kept per-user so different users
+/// never share a server; the directory is created 0700.
+fn server_socket_path(cfg: &Config) -> PathBuf {
+    if let Some(p) = cfg.path("ANGR_GHIDRA_SERVER_SOCKET", "server_socket") {
+        return p;
+    }
+    #[cfg(unix)]
+    {
+        let uid = unsafe { libc_getuid() };
+        let base = env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env::temp_dir());
+        let dir = base.join(format!("angr-ghidra-{uid}"));
+        let _ = fs::create_dir_all(&dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        }
+        dir.join("decompile.sock")
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: a token file holding "port\ntoken"
+        env::temp_dir().join("angr-ghidra-decompile.token")
+    }
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "getuid"]
+    fn libc_getuid() -> u32;
+}
+
+#[cfg(unix)]
+fn connect_socket(path: &Path) -> Option<ServerStream> {
+    use std::os::unix::net::UnixStream;
+    UnixStream::connect(path).ok().map(ServerStream::Unix)
+}
+
+#[cfg(not(unix))]
+fn connect_socket(token_path: &Path) -> Option<ServerStream> {
+    use std::net::TcpStream;
+    let text = fs::read_to_string(token_path).ok()?;
+    let mut lines = text.lines();
+    let port: u16 = lines.next()?.trim().parse().ok()?;
+    let token = lines.next()?.trim().to_string();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    // hand the token to the server first so it can authenticate the connection
+    stream.write_all(format!("{token}\n").as_bytes()).ok()?;
+    Some(ServerStream::Tcp(stream))
+}
+
+/// Start the server daemon detached: it must outlive this launcher process and
+/// serve later invocations. Its stdio is discarded (it speaks over the socket).
+fn spawn_server(cfg: &Config, exe_dir: &Path, socket_path: &Path, idle: &str) -> bool {
+    let python = resolve_python(cfg);
+    let mut c = Command::new(&python);
+    c.arg("-m").arg("angr_ghidra_core.core.server_daemon");
+    #[cfg(unix)]
+    {
+        c.arg("--socket").arg(socket_path);
+    }
+    #[cfg(not(unix))]
+    {
+        c.arg("--tcp").arg(socket_path);
+    }
+    c.arg("--idle").arg(idle);
+    let mut plan = Vec::new();
+    apply_child_env(&mut c, cfg, &mut plan);
+    if let Some(ms) = cfg.scalar("ANGR_GHIDRA_CFG_MAX_SIZE", "cfg_max_size") {
+        c.env("ANGR_GHIDRA_CFG_MAX_SIZE", ms);
+    }
+    let _ = exe_dir; // core module is resolved via PYTHONPATH/env, like direct mode
+    c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    detach(&mut c);
+    c.spawn().is_ok()
+}
+
+/// Put the spawned server in its own session so it is not torn down when Ghidra
+/// reaps this launcher (Unix: setsid via pre_exec).
+#[cfg(unix)]
+fn detach(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            // detach from the controlling terminal/process group
+            extern "C" {
+                fn setsid() -> i32;
+            }
+            setsid();
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn detach(_cmd: &mut Command) {}
+
+enum ServerStream {
+    #[cfg(unix)]
+    Unix(std::os::unix::net::UnixStream),
+    #[cfg(not(unix))]
+    Tcp(std::net::TcpStream),
+}
+
+/// Proxy Ghidra's stdin/stdout to the server socket byte-for-byte, then exit.
+/// Ends when either side closes: Ghidra's stdin EOF (tool shutdown) or the
+/// server closing the connection (deregisterProgram).
+fn proxy_and_exit(stream: ServerStream) -> ! {
+    let (mut to_srv, mut from_srv) = match stream {
+        #[cfg(unix)]
+        ServerStream::Unix(s) => {
+            let r = s.try_clone().expect("clone socket");
+            (StreamBox::Unix(s), StreamBox::Unix(r))
+        }
+        #[cfg(not(unix))]
+        ServerStream::Tcp(s) => {
+            let r = s.try_clone().expect("clone socket");
+            (StreamBox::Tcp(s), StreamBox::Tcp(r))
+        }
+    };
+
+    // stdin -> server (detached: reading Ghidra's stdin may block indefinitely;
+    // on EOF we shut the write half so the server sees the session end)
+    thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let _ = copy_stream(&mut stdin, &mut to_srv);
+        to_srv.shutdown_write();
+    });
+
+    // server -> stdout (this is the lifetime of the session)
+    let mut stdout = std::io::stdout().lock();
+    let _ = copy_stream(&mut from_srv, &mut stdout);
+    let _ = stdout.flush();
+    std::process::exit(0);
+}
+
+enum StreamBox {
+    #[cfg(unix)]
+    Unix(std::os::unix::net::UnixStream),
+    #[cfg(not(unix))]
+    Tcp(std::net::TcpStream),
+}
+
+impl StreamBox {
+    fn shutdown_write(&self) {
+        match self {
+            #[cfg(unix)]
+            StreamBox::Unix(s) => {
+                let _ = s.shutdown(std::net::Shutdown::Write);
+            }
+            #[cfg(not(unix))]
+            StreamBox::Tcp(s) => {
+                let _ = s.shutdown(std::net::Shutdown::Write);
+            }
+        }
+    }
+}
+
+impl Read for StreamBox {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            #[cfg(unix)]
+            StreamBox::Unix(s) => s.read(buf),
+            #[cfg(not(unix))]
+            StreamBox::Tcp(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for StreamBox {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            #[cfg(unix)]
+            StreamBox::Unix(s) => s.write(buf),
+            #[cfg(not(unix))]
+            StreamBox::Tcp(s) => s.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            #[cfg(unix)]
+            StreamBox::Unix(s) => s.flush(),
+            #[cfg(not(unix))]
+            StreamBox::Tcp(s) => s.flush(),
+        }
+    }
+}
+
+/// Binary-safe copy that flushes each chunk (the protocol is interactive, so we
+/// must not buffer a burst waiting for more input).
+fn copy_stream<R: Read, W: Write>(r: &mut R, w: &mut W) -> std::io::Result<()> {
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        w.write_all(&buf[..n])?;
+        w.flush()?;
+    }
+    Ok(())
 }
 
 // --------------------------------------------------------------------------

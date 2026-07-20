@@ -35,5 +35,33 @@
 #   env override: ANGR_GHIDRA_FALLBACK
 # fallback = C:\path\to\ghidra\...\os\win_x86_64\decompile.orig.exe
 
+# --- Server mode (performance) --------------------------------------------
+# Instead of starting a fresh Python+angr process for every decompile, connect
+# to a shared, long-lived angr server (started automatically on first use) and
+# proxy Ghidra's protocol to it over a local socket. The server keeps the
+# whole-image CFG cache warm across decompiles, so functions after the first are
+# served in a fraction of the time. On any connect/spawn failure the launcher
+# falls back to the direct per-call mode. Enabling `log` above forces direct
+# mode (so the log captures the core's stderr).
+#   env override: ANGR_GHIDRA_SERVER
+# server = 1
+
+# Where the server listens. Default: a per-user path under $XDG_RUNTIME_DIR (or
+# the temp dir), so each user gets their own server. On Windows this is a token
+# file holding the localhost port and an auth token.
+#   env override: ANGR_GHIDRA_SERVER_SOCKET
+# server_socket = /run/user/1000/angr-ghidra/decompile.sock
+
+# Idle timeout: the server exits this many seconds after the last connection
+# closes (i.e. shortly after Ghidra is shut down). Default 600.
+#   env override: ANGR_GHIDRA_SERVER_IDLE
+# server_idle = 600
+
+# Only build a whole-image CFG for programs whose mapped code image is at most
+# this many bytes; larger programs use the scoped per-function path. Default
+# 512000 (500 KiB).
+#   env override: ANGR_GHIDRA_CFG_MAX_SIZE
+# cfg_max_size = 512000
+
 # Arbitrary extra environment variables for the child process:
 # env.SOME_VAR = some value
