@@ -176,7 +176,12 @@ class AngrCore:
             # fast path: decompile the function straight out of a cached
             # whole-image CFG; fall back to a scoped load+CFG when the image is
             # too big, the function isn't cleanly present, or anything goes wrong.
-            result = self._image_decompile(entry, name, edits)
+            # Ghidra's function size gates it: angr's whole-image CFG must have
+            # recovered the same extent (a different split is a different --
+            # possibly wrong -- function), giving the "block range matches
+            # Ghidra's" guarantee.
+            ghidra_size = fn_el.attr("size") if fn_el is not None else None
+            result = self._image_decompile(entry, name, edits, ghidra_size)
             if result is None:
                 result = self._decompile(entry, name, code, edits)
             codegen, arch, func_size, ail_graph = result
@@ -395,7 +400,7 @@ class AngrCore:
             self._image_cache = ImageCache(max_size=max_size)
         return self._image_cache
 
-    def _image_decompile(self, entry: int, name: str, edits=None):
+    def _image_decompile(self, entry: int, name: str, edits=None, ghidra_size=None):
         """Decompile `entry` directly out of the cached whole-image CFG. Returns
         the usual (codegen, arch, size, ail_graph) tuple, or None to fall back to
         the scoped path."""
@@ -413,6 +418,15 @@ class AngrCore:
         # only take the fast path for a clean, real function present at exactly
         # Ghidra's entry -- otherwise the scoped path is the safe answer
         if func is None or func.is_plt or func.is_simprocedure or func.is_alignment:
+            return None
+        # block-range match: angr's whole-image CFG must have recovered the same
+        # extent Ghidra sees. When it split the function differently (tail call
+        # promoted to its own function, a missed/extra block), the fast-path
+        # result would not correspond to Ghidra's function, so defer to the
+        # scoped path which recovers the function in isolation.
+        if ghidra_size is not None and func.size != ghidra_size:
+            log.debug("image size mismatch for %s: angr=%s ghidra=%s -> scoped",
+                      name, func.size, ghidra_size)
             return None
         try:
             if func.size == 0 or not any(True for _ in func.blocks):

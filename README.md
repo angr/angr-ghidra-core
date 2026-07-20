@@ -213,6 +213,24 @@ Beyond stage 3 (text-level decompilation through the real protocol):
   over our emitted graph, stored as a hash-storage DB local, round-trips into
   the C output (`ghidra_validation/HashEditRoundTrip.java`).
 
+- **[done] Performance: warm server + whole-image CFG cache.** Instead of a
+  fresh Python+angr process per decompile, the native launcher starts a
+  long-lived **server** (`core/server_daemon.py`) once and proxies each Ghidra
+  `decompile` invocation to it over a local socket; the server shares one
+  whole-image CFG cache across all sessions and exits ~10 min after Ghidra
+  closes. For programs whose mapped code image is ≤ 500 KB, the core recovers
+  one `CFGFast` over the whole image (probed via `getBytes`, since Ghidra never
+  sends the file), content-addresses it, and persists it with **angrdb** keyed
+  by that hash — so a function is decompiled straight out of the cached CFG
+  instead of a per-call scoped load. A function is only served this way when its
+  angr-recovered extent matches Ghidra's function size (the "block range matches
+  Ghidra's" guard); otherwise it falls back to the scoped path, so a differing
+  CFG split never yields a wrong body. On `bomb` (14 functions) this is ~2×
+  faster per function after the first; with the warm server the first-decompile
+  CFG cost is paid once per binary across the whole Ghidra session. Enable it
+  with `server = 1` in `angr-decompile.conf`. Validated against real headless
+  Ghidra in server mode (failures=0; Nav/Slice/Edit/HashEdit all PASS).
+
 Remaining, in planned order:
 
 1. **True LOAD/STORE lowering.** Memory def-use is currently approximated by

@@ -110,6 +110,32 @@ def test_server_output_matches_stdio_core(server):
     assert server_c == stdio_c
 
 
+BOMB = "/workspace/binaries/tests/x86_64/bomb"
+
+
+@pytest.mark.skipif(not os.path.exists(BOMB), reason="bomb binary not available")
+def test_size_gate_falls_back_on_missplit(tmp_path):
+    """A function whose whole-image extent differs from Ghidra's must fall back
+    to the scoped path rather than emit a mis-split (degenerate) body. bomb's
+    phase_2 is one such case: the whole-image CFG recovers it two bytes short."""
+    os.environ["ANGR_GHIDRA_CACHE"] = str(tmp_path / "cache")
+    try:
+        s = DecompSession(BOMB, core=ANGR_CORE)     # image mode (default)
+        image_c = s.decompile("phase_2").c
+        s.close()
+
+        os.environ["ANGR_GHIDRA_NO_IMAGE_CACHE"] = "1"
+        s = DecompSession(BOMB, core=ANGR_CORE)     # scoped mode
+        scoped_c = s.decompile("phase_2").c
+        s.close()
+    finally:
+        os.environ.pop("ANGR_GHIDRA_NO_IMAGE_CACHE", None)
+
+    # the gate made image mode defer to scoped -> identical, full-body output
+    assert image_c == scoped_c
+    assert "read_six_numbers" in image_c  # not a degenerate 'void phase_2(void)'
+
+
 def test_idle_timeout_exits():
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     import tempfile
