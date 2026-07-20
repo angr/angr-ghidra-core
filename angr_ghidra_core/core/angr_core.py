@@ -35,6 +35,26 @@ log = logging.getLogger("angr_ghidra_core")
 
 WINDOW_PAD = 0x40  # bytes fetched before/after the function body for CFG context
 
+# Peephole optimizations that resolve loads by reading program *data* memory
+# (constant/PC-relative/MIPS gp-relative). Our project only maps the code image,
+# so these raise KeyError on the data address and abort the whole decompilation.
+# We retry without them when a decompile yields nothing (see _run_decompiler).
+_DATA_READING_PEEPHOLES = frozenset(
+    {"ConstantDereferences", "SimplifyPcRelativeLoads", "RewriteMipsGpLoads"}
+)
+_reduced_peepholes = None  # lazily built list, cached process-wide
+
+
+def _reduced_peephole_opts():
+    global _reduced_peepholes
+    if _reduced_peepholes is None:
+        from angr.analyses.decompiler.peephole_optimizations import EXPR_OPTS, STMT_OPTS
+        _reduced_peepholes = [
+            o for o in (*EXPR_OPTS, *STMT_OPTS)
+            if o.__name__ not in _DATA_READING_PEEPHOLES
+        ]
+    return _reduced_peepholes
+
 
 def clean_symbol_name(name: str) -> str:
     """Strip Ghidra's getCodeLabel namespace prefix. getSymbolName prefixes a
@@ -61,6 +81,7 @@ class AngrCore:
         self._image_cache = image_cache
         self._decompile_lock = decompile_lock
         self._image_disabled = False
+        self._arch_cache = None  # angr arch, resolved by probing getRegister
 
     # ------------------------------------------------------------- main loop
 
@@ -114,9 +135,14 @@ class AngrCore:
     def _ensure_emitter(self) -> None:
         if self.emitter is not None:
             return
-        # resolve the return register storage via a getRegister callback, so the
-        # offset matches Ghidra's register-space convention exactly
-        off, size = self._query_register(self.spec.return_register_name)
+        # resolve the return register storage. When the cspec named the register
+        # (x86-style), ask Ghidra for its storage so the offset matches Ghidra's
+        # register space exactly; when the cspec gave a direct register-space
+        # address (ARM/MIPS/PPC normalized specs), use it as-is.
+        if self.spec.return_register_addr is not None:
+            off, size = self.spec.return_register_addr
+        else:
+            off, size = self._query_register(self.spec.return_register_name)
         self.emitter = ResponseEmitter(
             self.spec.space_ram, self.spec.space_register, (off, size),
             self.spec.coretype_ids, space_unique=self.spec.space_unique,
@@ -248,6 +274,59 @@ class AngrCore:
             return payload.decode("utf-8")
         return None
 
+    def _register_exists(self, name: str) -> bool:
+        """True if Ghidra knows a register by this name (getRegister resolves it).
+        An unknown register comes back as an exception frame."""
+        enc = PackedEncoder()
+        enc.open_element(ids.ELEM_COMMAND_GETREGISTER)
+        enc.write_string(ids.ATTRIB_NAME, name)
+        enc.close_element(ids.ELEM_COMMAND_GETREGISTER)
+        try:
+            kind, payload = self.t.query(enc)
+        except CallbackException:
+            return False
+        return kind == "string" and bool(payload)
+
+    def _resolve_arch(self):
+        """Resolve the angr arch by probing Ghidra for landmark registers.
+
+        Ghidra's normalized specs don't carry ABI register names (the compiler
+        spec is offset-based and the processor spec lists only internal/context
+        registers), so a name fingerprint over the spec text is unreliable. The
+        getRegister callback, however, authoritatively knows each ISA's register
+        names -- so we ask which landmark registers exist. Cached per session;
+        falls back to the spec's best-effort arch if probing is inconclusive."""
+        if self._arch_cache is not None:
+            return self._arch_cache
+
+        import archinfo
+        bits = self.spec.bits
+        endness = "Iend_BE" if self.spec.bigendian else "Iend_LE"
+        ident = None
+        if self._register_exists("RAX"):
+            ident = "amd64"
+        elif self._register_exists("EAX"):
+            ident = "x86"
+        elif self._register_exists("x0"):
+            ident = "aarch64"
+        elif self._register_exists("v0") and self._register_exists("a0"):
+            ident = "mips64" if bits == 64 else "mips32"
+        elif self._register_exists("r31") and self._register_exists("r3"):
+            ident = "ppc64" if bits == 64 else "ppc32"
+        elif self._register_exists("r0") and self._register_exists("lr"):
+            ident = "arm"
+
+        arch = None
+        if ident is not None:
+            try:
+                arch = archinfo.arch_from_id(ident, endness=endness, bits=bits)
+            except Exception:
+                arch = None
+        if arch is None:
+            arch = self.spec.angr_arch  # spec fingerprint / bit-width default
+        self._arch_cache = arch
+        return arch
+
     def _reg_to_angr(self, arch):
         def resolve(offset, size):
             try:
@@ -324,7 +403,7 @@ class AngrCore:
 
         proj = angr.load_shellcode(
             code,
-            arch=self.spec.angr_arch,
+            arch=self._resolve_arch(),
             start_offset=0,
             load_address=entry,
             support_selfmodifying_code=False,
@@ -353,7 +432,7 @@ class AngrCore:
         proj, cfg, func = self._load_and_cfg(entry, name, code)
         self._name_call_targets(proj, func, entry, len(code))
         vkb = KnowledgeBase(proj)
-        dec = proj.analyses.Decompiler(func, cfg=cfg.model, variable_kb=vkb)
+        dec = self._run_decompiler(proj, func, cfg.model, vkb)
         if dec.codegen is None:
             raise RuntimeError(f"angr produced no code for {name} @ {entry:#x}")
         arch = proj.arch
@@ -361,6 +440,20 @@ class AngrCore:
             dec = self._apply_edits(proj, func, cfg.model, vkb, dec, entry, arch, edits)
         func_size = func.size or len(code)
         return dec.codegen, arch, func_size, dec.ail_graph
+
+    def _run_decompiler(self, proj, func, cfg_model, vkb):
+        """Run the angr Decompiler, retrying once without the data-reading
+        peephole optimizations if the first attempt produces no code. Those
+        optimizations read program data memory that our code-only image does not
+        map (MIPS gp-relative globals, PC-relative and constant dereferences),
+        which otherwise aborts the decompilation with a KeyError."""
+        dec = proj.analyses.Decompiler(func, cfg=cfg_model, variable_kb=vkb)
+        if dec.codegen is not None:
+            return dec
+        log.debug("decompile produced no code; retrying without data-reading peepholes")
+        return proj.analyses.Decompiler(
+            func, cfg=cfg_model, variable_kb=vkb,
+            peephole_optimizations=_reduced_peephole_opts())
 
     def _apply_edits(self, proj, func, cfg_model, vkb, dec, entry, arch, edits):
         """Apply user renames/retypes to a decompilation, re-decompiling when a
@@ -379,7 +472,7 @@ class AngrCore:
             retyped = apply_retypes(dec.codegen, edits, vkb.variables[entry],
                                     reg_to_angr, ghidra_type_to_sim, arch)
             if retyped:
-                dec = proj.analyses.Decompiler(func, cfg=cfg_model, variable_kb=vkb)
+                dec = self._run_decompiler(proj, func, cfg_model, vkb)
             # renames only need a name swap + re-render
             apply_renames(dec.codegen, edits, reg_to_angr)
         except Exception:
@@ -409,7 +502,7 @@ class AngrCore:
         cache = self._get_image_cache()
         if cache is None:
             return None
-        got = cache.get(entry, self._get_bytes, self.spec.angr_arch)
+        got = cache.get(entry, self._get_bytes, self._resolve_arch())
         if got is None:
             return None
         proj, cfg_model = got
@@ -438,7 +531,7 @@ class AngrCore:
         try:
             self._name_call_targets(proj, func, entry, func.size)
             vkb = KnowledgeBase(proj)
-            dec = proj.analyses.Decompiler(func, cfg=cfg_model, variable_kb=vkb)
+            dec = self._run_decompiler(proj, func, cfg_model, vkb)
             if dec.codegen is None:
                 return None
             arch = proj.arch
@@ -522,21 +615,25 @@ class AngrCore:
         arguments. In scoped mode targets lie outside the blob; in whole-image
         mode the blob has no symbol/PLT info, so its CFG names them `sub_*` --
         either way Ghidra is the authority for the name (resolving PLT thunks to
-        `strcmp`, `open`, ...) and the prototype. We scan the function's call
-        instructions; name and prototype come from one getMappedSymbols query per
-        target."""
+        `strcmp`, `open`, ...) and the prototype. Name and prototype come from one
+        getMappedSymbols query per target."""
+        # Find direct call targets via VEX, which is architecture-independent: a
+        # block that ends in a call has jumpkind Ijk_Call and its `next` is the
+        # callee (a constant for a direct call; a register/tmp for an indirect
+        # call, which we can't name and skip). This works over a scoped blob
+        # where CFG call *edges* aren't recorded (targets lie outside the region),
+        # unlike func.get_call_sites(), and needs no x86 "call" mnemonic.
         targets: set[int] = set()
         for block in func.blocks:
             try:
-                insns = block.capstone.insns
+                vb = block.vex
             except Exception:
                 continue
-            for ins in insns:
-                if ins.mnemonic == "call":
-                    try:
-                        targets.add(int(ins.op_str, 16))
-                    except ValueError:
-                        pass  # indirect call
+            if vb.jumpkind != "Ijk_Call":
+                continue
+            con = getattr(vb.next, "con", None)
+            if con is not None:
+                targets.add(int(con.value))
         for tgt in targets:
             if tgt == entry:
                 continue

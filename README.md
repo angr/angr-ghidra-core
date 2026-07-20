@@ -231,6 +231,20 @@ Beyond stage 3 (text-level decompilation through the real protocol):
   with `server = 1` in `angr-decompile.conf`. Validated against real headless
   Ghidra in server mode (failures=0; Nav/Slice/Edit/HashEdit all PASS).
 
+- **[done] Multi-architecture.** The core is no longer x86-only. It infers the
+  architecture by probing Ghidra's `getRegister` callback for landmark registers
+  (the normalized specs Ghidra sends carry no ABI register names, so a spec-text
+  fingerprint is unreliable); resolves the return register from either a named or
+  an offset-based compiler-spec pentry; detects call targets via VEX
+  (`Ijk_Call`) rather than an x86 `call` mnemonic; and retries without the
+  data-reading peephole optimizations when a code-only image can't satisfy a
+  MIPS `gp` / PC-relative / constant load. Validated against real headless
+  Ghidra (`failures=0`) on **x86-64, i386, ARM (armel), AArch64, MIPS32 (BE and
+  LE), and PPC32** — covering both endiannesses, 32/64-bit, and four ISA
+  families. See `tests/test_multiarch.py`. Not yet supported: ARM Thumb (odd
+  entry needs consistent T-bit handling) and PPC64 ELFv1 (the symbol points at a
+  function descriptor, not code).
+
 Remaining, in planned order:
 
 1. **True LOAD/STORE lowering.** Memory def-use is currently approximated by

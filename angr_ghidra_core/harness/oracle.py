@@ -87,7 +87,7 @@ class PypcodeOracle:
     def __init__(
         self,
         binary_path: str,
-        langid: str = "x86:LE:64:default",
+        langid: str | None = None,
         pspec: str | None = None,
         cspec: str | None = None,
         ghidra_root: str = "/workspace/ghidra",
@@ -95,13 +95,25 @@ class PypcodeOracle:
     ):
         self.binary_path = binary_path
         self.loader = cle.Loader(binary_path, auto_load_libs=False)
+
+        # derive the Ghidra language + spec documents from the loaded arch, so
+        # the oracle stands in for Ghidra on any supported architecture. Explicit
+        # langid/pspec/cspec still win (e.g. x86-64 default paths below).
+        from .archmap import spec_for_arch
+        archspec = spec_for_arch(self.loader.main_object.arch)
+        if langid is None:
+            langid = archspec.langid if archspec else "x86:LE:64:default"
+        self._archspec = archspec
+
         self.ctx = pypcode.Context(langid)
         self.langid = langid
         self.ghidra_root = Path(ghidra_root)
         self.trace = trace or (lambda *a: None)
 
-        self._pspec_path = pspec
-        self._cspec_path = cspec
+        self._pspec_path = pspec or (archspec.pspec_path if archspec else None)
+        self._cspec_path = cspec or (archspec.cspec_path if archspec else None)
+        self._ptr_bytes = archspec.ptr_bytes if archspec else 8
+        self._bigendian = archspec.bigendian if archspec else False
 
         # register maps
         self.reg_by_name: dict[str, tuple[int, int]] = {}
@@ -120,9 +132,12 @@ class PypcodeOracle:
             name: BUILTIN_ID_HEADER | (i + 0x10) for i, (name, _, _, _) in enumerate(CORE_TYPES)
         }
 
-        # conventional return register (RAX for x86-64); used as the unlocked
-        # return-storage hint in function prototypes
-        self.return_register = self.reg_by_name.get("RAX", (0, 8))
+        # the integer return register for this arch (from the compiler spec),
+        # used as the unlocked return-storage hint in function prototypes
+        ret_name = archspec.return_register if archspec else "RAX"
+        self.return_register = self.reg_by_name.get(ret_name) \
+            or self.reg_by_name.get(ret_name.upper()) \
+            or self.reg_by_name.get("RAX", (0, self._ptr_bytes))
 
         # functions from the binary's symbol table
         self.functions: dict[int, Function] = {}
@@ -173,14 +188,19 @@ class PypcodeOracle:
             / "Ghidra/Processors/x86/data/languages/x86-64-gcc.cspec"
         ).read_text()
 
-    def tspec(self, bigendian: bool = False) -> str:
+    def tspec(self, bigendian: bool | None = None) -> str:
+        # endianness and pointer width come from the loaded arch (a 32-bit arch
+        # has a 4-byte ram address size); the register space stays 4 bytes.
+        if bigendian is None:
+            bigendian = self._bigendian
         be = "true" if bigendian else "false"
+        ram_size = self._ptr_bytes
         return (
             f'<sleigh bigendian="{be}" uniqbase="0x{UNIQUE_BASE:x}">\n'
             "  <spaces defaultspace=\"ram\">\n"
-            f'    <space_other name="OTHER" index="{SPACE_OTHER}" size="8" bigendian="{be}"'
+            f'    <space_other name="OTHER" index="{SPACE_OTHER}" size="{ram_size}" bigendian="{be}"'
             ' delay="0" physical="true"/>\n'
-            f'    <space name="ram" index="{SPACE_RAM}" size="8" bigendian="{be}"'
+            f'    <space name="ram" index="{SPACE_RAM}" size="{ram_size}" bigendian="{be}"'
             ' delay="1" physical="true"/>\n'
             f'    <space name="register" index="{SPACE_REGISTER}" size="4" bigendian="{be}"'
             ' delay="0" physical="true"/>\n'
