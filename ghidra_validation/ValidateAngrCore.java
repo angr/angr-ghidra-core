@@ -115,6 +115,11 @@ public class ValidateAngrCore extends GhidraScript {
 			String c = (res.getDecompiledFunction() != null)
 				? res.getDecompiledFunction().getC() : null;
 			check(c != null && c.contains(funcName), "getC() renders and names the function");
+			// Semantic sanity: a structurally-valid response can still be wrong
+			// (e.g. Thumb bytes decoded as ARM), which angr marks with this
+			// string. Guard against it so a clean failures=0 means something.
+			check(c != null && !c.contains("unsupported instruction"),
+				"no undecoded instructions in output");
 			if (c != null) {
 				println("---- decompiled C (real Ghidra) ----");
 				println(c);

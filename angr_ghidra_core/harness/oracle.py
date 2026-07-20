@@ -160,6 +160,22 @@ class PypcodeOracle:
             if sym.name and sym.rebased_addr:
                 self.labels.setdefault(sym.rebased_addr, sym.name)
 
+        # Thumb ranges: on ARM, CLE marks a Thumb function with an odd symbol
+        # address. Real Ghidra tracks the T-mode context register and lifts
+        # p-code in the right mode; we emulate that for getPcode by setting the
+        # SLEIGH TMode context variable over these ranges, so the core's Thumb
+        # probe (getPcode instruction length) sees the true 2-byte instructions.
+        self._is_arm = mo.arch.name.upper().startswith("ARM")
+        self._thumb_ranges: list[tuple[int, int]] = []
+        if self._is_arm:
+            for f in self.functions.values():
+                if f.addr & 1:
+                    base = f.addr & ~1
+                    self._thumb_ranges.append((base, base + f.size))
+
+    def _addr_is_thumb(self, addr: int) -> bool:
+        return any(lo <= addr < hi for lo, hi in self._thumb_ranges)
+
     def add_function(self, addr: int, name: str, size: int) -> None:
         self.functions[addr] = Function(addr, name, size, 0x10000 + len(self.functions))
 
@@ -328,6 +344,10 @@ class PypcodeOracle:
             code = bytes(self.loader.memory.load(addr.offset, 16))
         except KeyError:
             return enc  # empty -> BadDataError in the core
+        # decode in the right ARM mode (Thumb inside a Thumb function), mirroring
+        # Ghidra's per-address T-mode tracking
+        if self._is_arm:
+            self.ctx.setVariableDefault("TMode", 1 if self._addr_is_thumb(addr.offset) else 0)
         try:
             tx = self.ctx.translate(code, base_address=addr.offset, max_instructions=1)
             ops = tx.ops

@@ -241,9 +241,19 @@ Beyond stage 3 (text-level decompilation through the real protocol):
   MIPS `gp` / PC-relative / constant load. Validated against real headless
   Ghidra (`failures=0`) on **x86-64, i386, ARM (armel), AArch64, MIPS32 (BE and
   LE), and PPC32** — covering both endiannesses, 32/64-bit, and four ISA
-  families. See `tests/test_multiarch.py`. Not yet supported: ARM Thumb (odd
-  entry needs consistent T-bit handling) and PPC64 ELFv1 (the symbol points at a
-  function descriptor, not code).
+  families. See `tests/test_multiarch.py`. Not yet supported: PPC64 ELFv1 (the
+  symbol points at a function descriptor, not code).
+- **[done] ARM Thumb.** Ghidra addresses a Thumb function at its even base and
+  doesn't expose the T-mode context register to the decompiler, so the mode is
+  detected by probing `getPcode` at the entry: any 2-byte instruction means
+  Thumb. angr then recovers and decompiles the function at `base | 1` (its
+  set-low-bit Thumb convention). ARM-32 resolves to `ArchARMHF`, which lifts
+  both soft- and hard-float integer code without the spurious flag `ccall`s that
+  `ArchARMEL` emits on Thumb. Validated against real headless Ghidra: armhf
+  `fauxware` decompiles to clean C with resolved `puts`/`read`/`authenticate`
+  calls and no undecoded instructions — where it previously produced confident
+  garbage that still reported `failures=0`. `ValidateAngrCore` now also asserts
+  the output contains no undecoded instructions, so a clean run means something.
 
 Remaining, in planned order:
 

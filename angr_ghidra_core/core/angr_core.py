@@ -82,6 +82,7 @@ class AngrCore:
         self._decompile_lock = decompile_lock
         self._image_disabled = False
         self._arch_cache = None  # angr arch, resolved by probing getRegister
+        self._thumb_cache: dict[int, bool] = {}  # masked entry -> is Thumb
 
     # ------------------------------------------------------------- main loop
 
@@ -178,11 +179,17 @@ class AngrCore:
         self._ensure_emitter()
         fn_el = self._query_mapped_function(entry)
         name = (fn_el.attr("name") if fn_el is not None else None) or f"func_{entry:x}"
+        # On ARM a function may be Thumb-encoded. Ghidra addresses it at the even
+        # base (Thumb is a context register, not an address bit) and doesn't tell
+        # the decompiler the mode, so probe getPcode. angr distinguishes Thumb by
+        # a set low bit, so we load from the even base and seed/recover at base|1.
+        base = (entry & ~1) if self._is_arm32() else entry
+        thumb = self._detect_thumb(base)
         # NOTE: the getMappedSymbols size is the symbol's storage size (e.g. a
         # pointer width), NOT the function's code length -- the real core never
         # needs the length because it follows p-code flow. So fetch a generous
         # readable window and let angr's CFG find the function's real extent.
-        code = self._fetch_window(entry)
+        code = self._fetch_window(base)
 
         # The paramid action asks only for the recovered parameters/return, so
         # Ghidra can populate the function signature (its own decompiler does
@@ -190,7 +197,7 @@ class AngrCore:
         # show arguments on later decompiles.
         if self.action == "paramid":
             with self._serialized():
-                return self._paramid(entry, name, code)
+                return self._paramid(base, name, code, thumb)
 
         # honour user edits (renames/retypes) committed to Ghidra's DB: they come
         # back in the localdb as locked symbols; apply them to angr's variables.
@@ -207,9 +214,12 @@ class AngrCore:
             # possibly wrong -- function), giving the "block range matches
             # Ghidra's" guarantee.
             ghidra_size = fn_el.attr("size") if fn_el is not None else None
-            result = self._image_decompile(entry, name, edits, ghidra_size)
+            # Thumb functions aren't found by the unseeded whole-image scan, so
+            # they always take the scoped path (which seeds the odd Thumb start).
+            result = None if thumb else \
+                self._image_decompile(entry, name, edits, ghidra_size)
             if result is None:
-                result = self._decompile(entry, name, code, edits)
+                result = self._decompile(base, name, code, edits, thumb)
             codegen, arch, func_size, ail_graph = result
             translator = self._build_pcode(ail_graph, arch)
             var_table = VariableSymbolTable(self._query_register, self.spec.space_register)
@@ -317,7 +327,17 @@ class AngrCore:
             ident = "arm"
 
         arch = None
-        if ident is not None:
+        if ident == "arm":
+            # archinfo.arch_from_id("arm") is ArchARMEL (soft-float). Use ARMHF
+            # for ARM-32 instead: it decompiles both soft- and hard-float integer
+            # code cleanly, while ARMEL emits spurious flag ccalls on Thumb
+            # (float-arg ABI, the only real difference, comes from Ghidra's cspec).
+            try:
+                arch = archinfo.ArchARMHF(
+                    archinfo.Endness.BE if self.spec.bigendian else archinfo.Endness.LE)
+            except Exception:
+                arch = None
+        elif ident is not None:
             try:
                 arch = archinfo.arch_from_id(ident, endness=endness, bits=bits)
             except Exception:
@@ -337,6 +357,57 @@ class AngrCore:
                 return None
             return None
         return resolve
+
+    def _query_pcode_length(self, addr: int) -> int | None:
+        """Ask Ghidra for the p-code of the instruction at `addr` and return its
+        length in bytes (the <inst off=...> fall offset). Ghidra lifts in the
+        instruction's real mode, so this is authoritative -- a 2-byte length can
+        only be a Thumb (16-bit) instruction."""
+        enc = PackedEncoder()
+        enc.open_element(ids.ELEM_COMMAND_GETPCODE)
+        encode_addr(enc, Addr(self.spec.space_ram, addr))
+        enc.close_element(ids.ELEM_COMMAND_GETPCODE)
+        try:
+            kind, payload = self.t.query(enc)
+        except CallbackException:
+            return None
+        if kind != "string" or not payload:
+            return None
+        try:
+            dec = PackedDecoder(payload)
+            dec.open_element(ids.ELEM_INST)
+            attrs = dict(dec.attributes())
+        except Exception:
+            return None
+        return attrs.get(ids.ATTRIB_OFFSET)
+
+    def _is_arm32(self) -> bool:
+        arch = self._resolve_arch()
+        return getattr(arch, "bits", 0) == 32 and \
+            getattr(arch, "name", "").upper().startswith("ARM")
+
+    def _detect_thumb(self, entry: int) -> bool:
+        """Whether the function at `entry` is Thumb. Ghidra doesn't expose the
+        T-mode context register to the decompiler, so probe getPcode: walk a few
+        instructions from the entry and, if any is 2 bytes long, it's Thumb.
+        ARM-32 only; cached per (masked) entry."""
+        if not self._is_arm32():
+            return False
+        base = entry & ~1
+        if base in self._thumb_cache:
+            return self._thumb_cache[base]
+        thumb = False
+        addr = base
+        for _ in range(8):
+            length = self._query_pcode_length(addr)
+            if not length or length <= 0:
+                break
+            if length == 2:
+                thumb = True
+                break
+            addr += length
+        self._thumb_cache[base] = thumb
+        return thumb
 
     def _query_code_label(self, addr: int) -> str:
         enc = PackedEncoder()
@@ -398,9 +469,14 @@ class AngrCore:
 
     # ------------------------------------------------------------ angr run
 
-    def _load_and_cfg(self, entry: int, name: str, code: bytes, function_starts=None):
+    def _load_and_cfg(self, entry: int, name: str, code: bytes, function_starts=None,
+                      thumb: bool = False):
         import angr
 
+        # `entry` is the even base; angr marks a Thumb function by a set low bit,
+        # so seed the CFG and look up the function at base|1 while the bytes load
+        # at the even base.
+        seed = (entry | 1) if thumb else entry
         proj = angr.load_shellcode(
             code,
             arch=self._resolve_arch(),
@@ -410,7 +486,7 @@ class AngrCore:
         )
         # extra function starts bound the CFG so a small callee doesn't fall
         # through into an adjacent function (which corrupts CC recovery)
-        starts = {entry}
+        starts = {seed}
         if function_starts:
             starts.update(function_starts)
         cfg = proj.analyses.CFGFast(
@@ -420,24 +496,24 @@ class AngrCore:
             start_at_entry=False,
             force_complete_scan=False,
         )
-        func = cfg.functions.get(entry)
+        func = cfg.functions.get(seed)
         if func is None:
-            func = proj.kb.functions.function(addr=entry, create=True)
+            func = proj.kb.functions.function(addr=seed, create=True)
         func.name = name
         return proj, cfg, func
 
-    def _decompile(self, entry: int, name: str, code: bytes, edits=None):
+    def _decompile(self, entry: int, name: str, code: bytes, edits=None, thumb: bool = False):
         from angr.knowledge_base import KnowledgeBase
 
-        proj, cfg, func = self._load_and_cfg(entry, name, code)
-        self._name_call_targets(proj, func, entry, len(code))
+        proj, cfg, func = self._load_and_cfg(entry, name, code, thumb=thumb)
+        self._name_call_targets(proj, func, func.addr, len(code))
         vkb = KnowledgeBase(proj)
         dec = self._run_decompiler(proj, func, cfg.model, vkb)
         if dec.codegen is None:
             raise RuntimeError(f"angr produced no code for {name} @ {entry:#x}")
         arch = proj.arch
         if edits:
-            dec = self._apply_edits(proj, func, cfg.model, vkb, dec, entry, arch, edits)
+            dec = self._apply_edits(proj, func, cfg.model, vkb, dec, func.addr, arch, edits)
         func_size = func.size or len(code)
         return dec.codegen, arch, func_size, dec.ail_graph
 
@@ -565,12 +641,12 @@ class AngrCore:
             log.exception("p-code translation failed")
             return None
 
-    def _paramid(self, entry: int, name: str, code: bytes) -> bytes:
+    def _paramid(self, entry: int, name: str, code: bytes, thumb: bool = False) -> bytes:
         """Recover the function's parameters/return with angr and emit them as a
         <parammeasures> response (the paramid action)."""
         inputs, output = [], None
         try:
-            proj, cfg, func = self._load_and_cfg(entry, name, code)
+            proj, cfg, func = self._load_and_cfg(entry, name, code, thumb=thumb)
             proj.analyses.VariableRecoveryFast(func)
             cca = proj.analyses.CallingConvention(func, cfg=cfg.model, analyze_callsites=True)
             cc, proto = cca.cc, cca.prototype
@@ -687,8 +763,11 @@ class AngrCore:
             return self._proto_cache[tgt]
         proto = None
         try:
-            code = self._fetch_window(tgt)
-            proj, cfg, func = self._load_and_cfg(tgt, f"sub_{tgt:x}", code, known_starts)
+            base = (tgt & ~1) if self._is_arm32() else tgt
+            thumb = self._detect_thumb(base)
+            code = self._fetch_window(base)
+            proj, cfg, func = self._load_and_cfg(base, f"sub_{tgt:x}", code,
+                                                 known_starts, thumb=thumb)
             proj.analyses.VariableRecoveryFast(func)
             cca = proj.analyses.CallingConvention(func, cfg=cfg.model, analyze_callsites=True)
             if cca.cc is not None and cca.prototype is not None:
