@@ -147,13 +147,24 @@ copy /Y "%BUILT%" "%TARGET%" >nul
 echo   ok installed launcher -^> %TARGET%
 
 rem ---- write config -------------------------------------------------------
+rem Standalone "redirect-first echo" lines: they print a value verbatim even
+rem when it contains '(' or ')' (a path under "Program Files (x86)"). An echo
+rem placed *inside* an if -- "if COND >>f echo ... %VAR% ..." -- does NOT: cmd
+rem then treats a ')' in the value as a block delimiter and truncates the line.
+rem So the conditional lines are guarded with goto, not an inline if.
  > "%CONF%" echo # Written by install.bat. Edit as needed; env vars override these.
 >> "%CONF%" echo python     = %PYTHON%
 >> "%CONF%" echo core       = %CORE%
 >> "%CONF%" echo pythonpath = %REPO%
-if exist "%BACKUP%"    >> "%CONF%" echo fallback   = %BACKUP%
-if "%SERVER%"=="1"     >> "%CONF%" echo server     = 1
-if not "%SERVER%"=="1" >> "%CONF%" echo # server   = 1   uncomment for the faster shared-server mode
+if not exist "%BACKUP%" goto cfg_server
+>> "%CONF%" echo fallback   = %BACKUP%
+:cfg_server
+if "%SERVER%"=="1" goto cfg_server_on
+>> "%CONF%" echo # server   = 1   uncomment for the faster shared-server mode
+goto cfg_done
+:cfg_server_on
+>> "%CONF%" echo server     = 1
+:cfg_done
 echo   ok wrote config -^> %CONF%
 
 echo ==^> Done. Restart Ghidra to use the angr decompiler.
