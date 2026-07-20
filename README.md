@@ -115,8 +115,15 @@ shared-server mode. The install is reversible:
 
 The installer autodetects the platform's `os/<platform>/` directory and, if
 `--ghidra` is omitted, falls back to `$GHIDRA_INSTALL_DIR` (then a search of
-common locations on Unix). It needs a Rust toolchain (`cargo`) to build the
-launcher. **Restart Ghidra** afterwards.
+common locations on Unix). **Restart Ghidra** afterwards.
+
+**Prebuilt launcher.** The installer uses a ready-made launcher binary when one
+is available, so a Rust toolchain is only needed as a last resort. It looks in
+order for: `--launcher PATH` (an explicit binary), then one shipped in the
+release under `prebuilt/<platform>/decompile` or `prebuilt/decompile`, and only
+then falls back to a `cargo build`. So a release tarball that bundles the
+prebuilt binary installs with no compiler at all. Pass `--build` to force a
+build even when a prebuilt binary is present.
 
 ### The manual way
 

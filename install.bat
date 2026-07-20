@@ -23,6 +23,8 @@ set "PYTHON="
 set "VENV="
 set "SERVER=0"
 set "UNINSTALL=0"
+set "LAUNCHER="
+set "FORCE_BUILD=0"
 
 :parse
 if "%~1"=="" goto parsed
@@ -30,6 +32,8 @@ if /I "%~1"=="--ghidra"    goto p_ghidra
 if /I "%~1"=="--python"    goto p_python
 if /I "%~1"=="--venv"      goto p_venv
 if /I "%~1"=="--server"    goto p_server
+if /I "%~1"=="--launcher"  goto p_launcher
+if /I "%~1"=="--build"     goto p_build
 if /I "%~1"=="--uninstall" goto p_uninstall
 if /I "%~1"=="--help"      goto usage
 if /I "%~1"=="-h"          goto usage
@@ -45,8 +49,14 @@ shift & shift & goto parse
 :p_venv
 set "VENV=%~2"
 shift & shift & goto parse
+:p_launcher
+set "LAUNCHER=%~2"
+shift & shift & goto parse
 :p_server
 set "SERVER=1"
+shift & goto parse
+:p_build
+set "FORCE_BUILD=1"
 shift & goto parse
 :p_uninstall
 set "UNINSTALL=1"
@@ -92,14 +102,41 @@ set "PYTHON=%VENV%\Scripts\python.exe"
 if errorlevel 1 goto bad_python
 echo   ok Python:   %PYTHON%
 
-rem ---- build the launcher -------------------------------------------------
+rem ---- obtain the launcher (prebuilt if available, else build) ------------
+rem Prefer a ready-made binary: --launcher, then one shipped in a release
+rem (prebuilt\<platform>\decompile.exe or prebuilt\decompile.exe); build with
+rem cargo only when none is found, so Rust isn't required for a prebuilt release.
+set "BUILT="
+if "%FORCE_BUILD%"=="1" goto do_build
+if defined LAUNCHER goto use_explicit
+if exist "%REPO%\prebuilt\%OSNAME%\decompile.exe" goto pre_platform
+if exist "%REPO%\prebuilt\decompile.exe" goto pre_flat
+goto do_build
+
+:pre_platform
+set "BUILT=%REPO%\prebuilt\%OSNAME%\decompile.exe"
+goto have_launcher
+:pre_flat
+set "BUILT=%REPO%\prebuilt\decompile.exe"
+goto have_launcher
+:use_explicit
+if not exist "%LAUNCHER%" goto bad_launcher
+set "BUILT=%LAUNCHER%"
+goto have_launcher
+
+:do_build
 where cargo >nul 2>&1 || goto no_cargo
-echo ==^> Building the launcher...
+echo ==^> Building the launcher with cargo...
 cargo build --release --quiet --manifest-path "%LAUNCHER_DIR%\Cargo.toml" || goto build_failed
 set "BUILT=%LAUNCHER_DIR%\target\release\decompile.exe"
 if not exist "%BUILT%" goto build_failed
 echo   ok built launcher
+goto do_install
 
+:have_launcher
+echo   ok using prebuilt launcher: %BUILT%
+
+:do_install
 rem ---- back up + install --------------------------------------------------
 if exist "%BACKUP%" goto skip_backup
 if not exist "%TARGET%" goto skip_backup
@@ -161,10 +198,15 @@ exit /b 1
 echo error: "%PYTHON%" cannot import angr/pypcode/cle. Fix it, or use --venv DIR.
 exit /b 1
 :no_cargo
-echo error: cargo (Rust) not found. Install Rust from https://rustup.rs and re-run.
+echo error: no prebuilt launcher found and cargo (Rust) is not installed.
+echo        Install Rust from https://rustup.rs, pass --launcher PATH, or ship a
+echo        binary at prebuilt\%OSNAME%\decompile.exe.
 exit /b 1
 :build_failed
 echo error: launcher build failed.
+exit /b 1
+:bad_launcher
+echo error: --launcher "%LAUNCHER%" does not exist.
 exit /b 1
 
 :usage
@@ -178,8 +220,14 @@ echo   --python PATH    Python interpreter that already has angr, pypcode and cl
 echo   --venv DIR       Create a fresh virtualenv at DIR and pip install
 echo                    angr/pypcode/cle into it (use instead of --python).
 echo   --server         Enable server mode (shared long-lived angr process; faster).
+echo   --launcher PATH  Use this prebuilt launcher binary instead of building one.
+echo   --build          Force building the launcher with cargo, even if a prebuilt
+echo                    binary is present.
 echo   --uninstall      Restore the original Ghidra decompiler and remove the config.
 echo   -h, --help       This message.
 echo.
-echo Requires: a Rust toolchain (cargo) to build the launcher.
+echo The launcher binary is used in this order: --launcher PATH, then a prebuilt
+echo binary shipped in the release (prebuilt\^<platform^>\decompile.exe or
+echo prebuilt\decompile.exe), then a cargo build. Rust (cargo) is only needed when
+echo no prebuilt binary is available.
 exit /b 0

@@ -21,6 +21,8 @@ PYTHON=""
 VENV=""
 SERVER=0
 UNINSTALL=0
+LAUNCHER=""
+FORCE_BUILD=0
 
 # ---- pretty output -------------------------------------------------------
 if [ -t 1 ]; then B=$'\033[1m'; G=$'\033[32m'; Y=$'\033[33m'; R=$'\033[31m'; N=$'\033[0m'
@@ -44,10 +46,16 @@ Usage: ./install.sh [options]
                    angr/pypcode/cle into it (use instead of --python).
   --server         Enable server mode (a shared long-lived angr process; much
                    faster after the first decompile).
+  --launcher PATH  Use this prebuilt launcher binary instead of building one.
+  --build          Force building the launcher with cargo, even if a prebuilt
+                   binary is present.
   --uninstall      Restore the original Ghidra decompiler and remove the config.
   -h, --help       This message.
 
-Requires: a Rust toolchain (cargo) to build the launcher.
+The launcher binary is used in this order: --launcher PATH, then a prebuilt
+binary shipped in the release (prebuilt/<platform>/decompile or
+prebuilt/decompile), then a cargo build. A Rust toolchain (cargo) is only
+needed when no prebuilt binary is available.
 EOF
 }
 
@@ -57,6 +65,8 @@ while [ $# -gt 0 ]; do
         --python)   PYTHON="${2:-}"; shift 2 ;;
         --venv)     VENV="${2:-}"; shift 2 ;;
         --server)   SERVER=1; shift ;;
+        --launcher) LAUNCHER="${2:-}"; shift 2 ;;
+        --build)    FORCE_BUILD=1; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
         -h|--help)  usage; exit 0 ;;
         *) die "unknown option: $1 (see --help)" ;;
@@ -142,13 +152,35 @@ PYTHON="$(cd "$(dirname "$PYTHON")" && pwd)/$(basename "$PYTHON")"
 py_has_deps "$PYTHON" || die "'$PYTHON' cannot import angr/pypcode/cle. Fix it, or use --venv."
 ok "Python:   $PYTHON"
 
-# ---- build the launcher --------------------------------------------------
-command -v cargo >/dev/null 2>&1 || die "cargo (Rust) not found. Install Rust from https://rustup.rs and re-run."
-info "Building the launcher..."
-cargo build --release --quiet --manifest-path "$LAUNCHER_DIR/Cargo.toml"
-BUILT="$LAUNCHER_DIR/target/release/decompile"
-[ -x "$BUILT" ] || die "launcher build did not produce $BUILT"
-ok "built launcher"
+# ---- obtain the launcher (prebuilt if available, else build) -------------
+# Prefer a ready-made binary: an explicit --launcher, then one shipped in a
+# release (prebuilt/<platform>/decompile or prebuilt/decompile). Only build with
+# cargo when none is found, so Rust isn't required for a prebuilt release.
+BUILT=""
+if [ "$FORCE_BUILD" -eq 0 ]; then
+    if [ -n "$LAUNCHER" ]; then
+        [ -x "$LAUNCHER" ] || die "--launcher '$LAUNCHER' is not an executable file."
+        BUILT="$LAUNCHER"
+    else
+        for cand in "$REPO/prebuilt/$OSDIR_NAME/decompile" "$REPO/prebuilt/decompile"; do
+            [ -x "$cand" ] && { BUILT="$cand"; break; }
+        done
+    fi
+fi
+
+if [ -n "$BUILT" ]; then
+    ok "using prebuilt launcher: $BUILT"
+else
+    command -v cargo >/dev/null 2>&1 || die \
+        "no prebuilt launcher found and cargo (Rust) is not installed. Install Rust
+   from https://rustup.rs, pass --launcher PATH, or ship a binary at
+   prebuilt/$OSDIR_NAME/decompile."
+    info "Building the launcher with cargo..."
+    cargo build --release --quiet --manifest-path "$LAUNCHER_DIR/Cargo.toml"
+    BUILT="$LAUNCHER_DIR/target/release/decompile"
+    [ -x "$BUILT" ] || die "launcher build did not produce $BUILT"
+    ok "built launcher"
+fi
 
 # ---- back up + install ---------------------------------------------------
 if [ ! -f "$BACKUP" ] && [ -f "$TARGET" ]; then
@@ -156,6 +188,11 @@ if [ ! -f "$BACKUP" ] && [ -f "$TARGET" ]; then
     ok "backed up original -> $BACKUP"
 fi
 install -m 0755 "$BUILT" "$TARGET"
+# a prebuilt binary unpacked from a downloaded tarball may be quarantined on
+# macOS, which would block Ghidra from spawning it; clear it if present
+if [ "$(uname -s)" = "Darwin" ]; then
+    xattr -d com.apple.quarantine "$TARGET" >/dev/null 2>&1 || true
+fi
 ok "installed launcher -> $TARGET"
 
 # ---- write config --------------------------------------------------------
