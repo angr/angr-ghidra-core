@@ -9,6 +9,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Latest public Ghidra release. The protocol element/attribute ids this project
+  # uses are identical in 12.1.2 and the 12.2 dev tree it was generated from
+  # (only unused ids differ), so a stock release is a valid integration target.
+  GHIDRA_VERSION: "12.1.2"
+  GHIDRA_ZIP: "ghidra_12.1.2_PUBLIC_20260605.zip"
+  GHIDRA_TAG: "Ghidra_12.1.2_build"
+
 jobs:
   # Wire-protocol unit tests. These import only angr_ghidra_core.ghidra_wire,
   # which has no angr dependency, so this job is fast and always meaningful --
@@ -33,11 +41,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release --manifest-path launcher/Cargo.toml
 
-  # The full Python suite. It needs the exact angr stack this project targets
-  # (angr master, version-locked at 9.3.0.dev0), which is built from source with
-  # its C (pyvex/VEX via CMake) and Rust (angr rustylib via setuptools-rust)
-  # extensions, plus the angr test-binaries corpus. Tests that cross-check
-  # against the C++ Ghidra core skip (that binary isn't built here).
+  # The full Python suite, driven through the protocol harness (a PypcodeOracle
+  # standing in for Ghidra). Needs the angr stack and the test-binaries corpus.
+  # No Ghidra install: the harness reads the SLEIGH processor specs it needs from
+  # pypcode's bundled copy of Ghidra's processor data. Expect ~8 skips -- the
+  # tests that cross-check against the real C++ core, which isn't built here.
   full-suite:
     name: Full test suite
     runs-on: ubuntu-latest
@@ -47,41 +55,67 @@ jobs:
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
-      - name: System build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
-
-      - name: Install the angr stack (pinned to this project's dev tree)
-        run: |
-          set -eux
-          python -m pip install --upgrade pip setuptools setuptools-rust wheel cffi scikit-build-core
-          src="$RUNNER_TEMP/angr-src"
-          get() {  # $1 repo  $2 commit  (clone with submodules for pyvex's VEX)
-            git clone --recurse-submodules "https://github.com/angr/$1.git" "$src/$1"
-            git -C "$src/$1" checkout "$2"
-            git -C "$src/$1" submodule update --init --recursive
-          }
-          get archinfo 9462a9cfc9a8c8c1648e8d62e9773065e660d23c
-          get pyvex    121759e98ff88ab9335266d323ae5cae149167c9
-          get claripy  3ebec4f14a4b9e419acadd0bd374262307569cdc
-          get cle      421cd616aa83f349d928c060107bbddfbccb4356
-          get angr     656890235fbd19c029da765db5f0a36dce81934b
-          pip install "$src/archinfo"
-          pip install "$src/pyvex"
-          pip install "$src/claripy"
-          pip install "$src/cle"
-          # angr's build pins pyvex==9.3.0.dev0 (not on PyPI), so build against
-          # the versions we just installed rather than an isolated environment.
-          pip install --no-build-isolation "$src/angr"
-          pip install pypcode==4.0.0 pytest pytest-xdist
-
+      - uses: ./.github/actions/setup-angr
+      - run: pip install pytest pytest-xdist
       - name: Fetch the test-binaries corpus
         run: git clone --depth 1 https://github.com/angr/binaries.git "$RUNNER_TEMP/binaries"
-
-      # No Ghidra install here: the harness reads the SLEIGH processor specs it
-      # needs from pypcode's bundled copy of Ghidra's processor data (the files
-      # are byte-identical). Expect ~8 skips -- the tests that cross-check
-      # against the real C++ core, which isn't built in CI.
       - name: Run the suite
         env:
           ANGR_GHIDRA_TEST_BINARIES: ${{ runner.temp }}/binaries/tests
         run: PYTHONPATH=. pytest -q -n auto
+
+  # The integration test that matters most: drive the core from a REAL Ghidra.
+  # The harness oracle is an approximation of Ghidra, and real Ghidra has
+  # repeatedly caught what it missed (attribute signedness, normalized
+  # offset-based compiler specs, Thumb decoded as ARM). This installs the
+  # launcher into a stock Ghidra release with ./install.sh and decompiles
+  # through analyzeHeadless, asserting Ghidra's own Java decoders accept the
+  # response (failures=0) across several architectures.
+  ghidra:
+    name: Real Ghidra integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"   # Ghidra 12.1.2: application.java.min=21
+      - uses: ./.github/actions/setup-angr
+
+      - name: Cache the Ghidra release
+        id: ghidra-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ghidra.zip
+          key: ghidra-${{ env.GHIDRA_ZIP }}
+      - name: Download Ghidra
+        if: steps.ghidra-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSL -o "$RUNNER_TEMP/ghidra.zip" \
+            "https://github.com/NationalSecurityAgency/ghidra/releases/download/${GHIDRA_TAG}/${GHIDRA_ZIP}"
+      - name: Unpack Ghidra
+        run: |
+          unzip -q "$RUNNER_TEMP/ghidra.zip" -d "$RUNNER_TEMP"
+          echo "GHIDRA_DIST=$(find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'ghidra_*_PUBLIC')" >> "$GITHUB_ENV"
+
+      - name: Install the angr decompiler into Ghidra
+        run: ./install.sh --ghidra "$GHIDRA_DIST" --python "$(which python)"
+
+      - name: Fetch the test-binaries corpus
+        run: git clone --depth 1 https://github.com/angr/binaries.git "$RUNNER_TEMP/binaries"
+
+      - name: Decompile through real Ghidra (multiple architectures)
+        env:
+          ANGR_GHIDRA_TEST_BINARIES: ${{ runner.temp }}/binaries/tests
+        run: |
+          set -e
+          for arch in x86_64 i386 armel armhf mips ppc; do
+            echo "::group::$arch"
+            scripts/run_ghidra_validation.sh \
+              "$RUNNER_TEMP/binaries/tests/$arch/fauxware" main
+            echo "::endgroup::"
+          done

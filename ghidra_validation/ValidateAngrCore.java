@@ -143,6 +143,13 @@ public class ValidateAngrCore extends GhidraScript {
 				}
 				check(varTokens > 0, "found tokens with a HighVariable (varref resolves)");
 				check(resolved > 0, "HighVariables resolve to a HighSymbol (rename target)");
+				// Our emission lists every rendered SSA value as a HighVariable
+				// instance, so *all* variable tokens must resolve. This is also a
+				// tripwire for accidentally decompiling with the stock C++ core
+				// (e.g. a launcher 'fallback' left enabled), whose varnodes only
+				// partially resolve this way.
+				check(resolved == varTokens,
+					"every variable token resolves (" + resolved + "/" + varTokens + ")");
 				println("ANGR_CORE_VALIDATION: varTokens=" + varTokens + " resolved=" + resolved);
 			}
 		}
