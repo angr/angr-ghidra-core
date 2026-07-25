@@ -11,7 +11,9 @@ from angr_ghidra_core.ghidra_wire.dump import parse_tree
 from angr_ghidra_core.harness.oracle import SPACE_RAM, PypcodeOracle
 
 CORE = "/workspace/ghidra/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_opt"
-FAUXWARE = "/workspace/binaries/tests/x86_64/fauxware"
+from tests.paths import binary
+
+FAUXWARE = binary("x86_64/fauxware")
 
 pytestmark = pytest.mark.skipif(
     not (os.path.exists(CORE) and os.path.exists(FAUXWARE)),

@@ -190,19 +190,28 @@ class PypcodeOracle:
     def pspec(self) -> str:
         if self._pspec_path:
             return Path(self._pspec_path).read_text()
-        # default: x86-64
-        return (
-            self.ghidra_root
-            / "Ghidra/Processors/x86/data/languages/x86-64.pspec"
-        ).read_text()
+        return self._default_spec("x86-64.pspec")
 
     def cspec(self) -> str:
         if self._cspec_path:
             return Path(self._cspec_path).read_text()
-        return (
-            self.ghidra_root
-            / "Ghidra/Processors/x86/data/languages/x86-64-gcc.cspec"
-        ).read_text()
+        return self._default_spec("x86-64-gcc.cspec")
+
+    def _default_spec(self, filename: str) -> str:
+        """Read a spec file for the x86-64 default, from a real Ghidra tree if
+        one is configured, else from pypcode's bundled processor data (see
+        archmap.find_language_files)."""
+        from .archmap import find_language_files
+
+        direct = self.ghidra_root / f"Ghidra/Processors/x86/data/languages/{filename}"
+        if direct.is_file():
+            return direct.read_text()
+        for path in find_language_files(filename):
+            return Path(path).read_text()
+        raise FileNotFoundError(
+            f"cannot find {filename}: no Ghidra installation (set $ANGR_GHIDRA_ROOT or "
+            "$GHIDRA_INSTALL_DIR) and pypcode's bundled processor data is unavailable"
+        )
 
     def tspec(self, bigendian: bool | None = None) -> str:
         # endianness and pointer width come from the loaded arch (a 32-bit arch

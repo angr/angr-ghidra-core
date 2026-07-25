@@ -75,10 +75,13 @@ jobs:
           pip install pypcode==4.0.0 pytest pytest-xdist
 
       - name: Fetch the test-binaries corpus
-        run: |
-          git clone --depth 1 https://github.com/angr/binaries.git "$RUNNER_TEMP/binaries"
-          sudo mkdir -p /workspace
-          sudo ln -sfn "$RUNNER_TEMP/binaries" /workspace/binaries
+        run: git clone --depth 1 https://github.com/angr/binaries.git "$RUNNER_TEMP/binaries"
 
+      # No Ghidra install here: the harness reads the SLEIGH processor specs it
+      # needs from pypcode's bundled copy of Ghidra's processor data (the files
+      # are byte-identical). Expect ~8 skips -- the tests that cross-check
+      # against the real C++ core, which isn't built in CI.
       - name: Run the suite
+        env:
+          ANGR_GHIDRA_TEST_BINARIES: ${{ runner.temp }}/binaries/tests
         run: PYTHONPATH=. pytest -q -n auto
