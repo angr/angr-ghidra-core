@@ -1,325 +1,128 @@
 # angr-ghidra-core
 
-Replace Ghidra's C++ (SLEIGH) decompiler core with the **angr decompiler**, without
-modifying any Ghidra Java code.
+Replaces Ghidra's C++ decompiler with the **angr decompiler**, without modifying
+Ghidra itself.
 
-Ghidra's UI, analyzers, and scripts talk to a native executable named `decompile`
-over a framed, packed-binary protocol on stdin/stdout. The C++ core has **no SLEIGH
-engine of its own** — Ghidra feeds it p-code one instruction at a time via a
-`getPcode` callback and answers all its questions about bytes, symbols, types, and
-comments through other callbacks. This project reimplements that protocol in Python
-and backs the `decompile` command with `angr.analyses.Decompiler`.
+## How it works
 
-## What works today
+Ghidra doesn't decompile in Java: it spawns a native executable named `decompile`
+and talks to it over a framed, packed-binary protocol on stdin/stdout. That core
+has **no SLEIGH engine of its own** — Ghidra feeds it p-code one instruction at a
+time and answers all its questions about bytes, symbols, types and comments
+through callbacks. This project reimplements the protocol and answers with
+`angr.analyses.Decompiler` instead:
 
-- **`ghidra_wire`** — a bit-exact implementation of Ghidra 12.2's wire protocol:
-  - `packed.py` — `PackedEncode`/`PackedDecode` (element/attribute ids, integers,
-    strings, spaces), verified against the format spec.
-  - `framing.py` — the burst framer (command / query / response / exception /
-    byte-stream / string-stream markers, codes 2–19).
-  - `client.py` — plays Ghidra's Java role (`DecompileProcess`): register a
-    program, set actions, `decompileAt`, service callback queries, handle
-    exception frames.
-  - `server.py` — plays the C++ core's role (`ghidra_process.cc`): read commands,
-    issue callback queries, return responses in the correct 6-…-7 framing.
-  - `ids.py` — element/attribute id tables generated from Ghidra's Java sources
-    (`scripts/gen_id_tables.py`).
-- **`harness`** — a `PypcodeOracle` that answers the core's callbacks from CLE
-  (bytes, symbols) and pypcode/SLEIGH (per-instruction p-code, registers), and
-  authors the `registerProgram` spec documents. Lets us drive **either** core
-  with no Ghidra installation.
-- **`core`** — the angr-backed core: parses the spec documents, loads the target
-  function's bytes through `getBytes`, runs a scoped `CFGFast` + `Decompiler`, and
-  emits a `decompileAt` `<doc>` (a minimal HighFunction model + a Clang C-markup
-  token tree) that Ghidra's `DecompileResults` can parse.
+- **`launcher/`** — a small, zero-dependency Rust binary installed in place of
+  `decompile`. It finds a Python interpreter and the core, then hands over the
+  process's stdio. Being native rather than a shell script is what makes the same
+  drop-in work on Windows.
+- **`angr_ghidra_core/ghidra_wire/`** — the wire protocol: packed encoding, burst
+  framing, both endpoints, and element/attribute id tables generated from
+  Ghidra's Java sources.
+- **`angr_ghidra_core/core/`** — the angr-backed core. It parses Ghidra's spec
+  documents, pulls the function's bytes through `getBytes`, runs angr, and emits
+  the HighFunction model and C markup that Ghidra's decoders expect.
+- **`angr_ghidra_core/harness/`** — a pypcode/CLE oracle that stands in for
+  Ghidra, so the core can be driven and tested with no Ghidra installed.
 
-Both the genuine C++ core (`ghidra_opt`) and the angr core decompile the same
-binary through the identical harness — see `tests/`.
+Ghidra's own Java decoders accept the result: variable tokens resolve through
+`varref → varnode → HighVariable → HighSymbol`, renames and retypes round-trip,
+p-code slicing works, and listing ↔ decompiler navigation works in both
+directions. Validated against real headless Ghidra on x86-64, i386, ARM
+(including Thumb), AArch64, MIPS (big- and little-endian) and PPC32 — see
+`ghidra_validation/` and [ROADMAP.md](ROADMAP.md).
 
-**Validated against real Ghidra.** The angr core has been driven by an actual
-headless Ghidra 12.2 (`analyzeHeadless` → `DecompInterface` → our shim). Ghidra's
-own Java decoders accept the response: a non-null `HighFunction` with a 7-symbol
-`LocalSymbolMap` (2 params + 5 locals), a `FunctionPrototype`, rendered C, and
-every variable token resolving through `varref → varnode → HighVariable →
-HighSymbol` (per-occurrence identity; rename targets resolve). See
-`ghidra_validation/ValidateAngrCore.java` and `scripts/run_ghidra_validation.sh`.
+## Installation
 
-### Ghidra testing
+Needs a Python with `angr`, `pypcode` and `cle` (the installer can create one).
+Rust is needed only when no prebuilt launcher is available.
 
-Needs a JDK 25 and a built Ghidra dist:
+### With the install script
 
 ```bash
-# 1. JDK 25 (Temurin) into /workspace/jdk, then build Ghidra's staged dist
-cd /workspace/ghidra
-JAVA_HOME=/workspace/jdk ./gradlew -I gradle/support/fetchDependencies.gradle
-JAVA_HOME=/workspace/jdk ./gradlew buildGhidra   # staged dir usable even if the
-                                                 # final SBOM/zip step fails
-# 2. build + install the launcher as the dist's decompile binary
-#    (keep the real ghidra_opt around as an ANGR_GHIDRA_FALLBACK escape hatch)
-(cd /workspace/angr-ghidra-core/launcher && cargo build --release)
-OS=build/dist/ghidra_12.2_DEV/Ghidra/Features/Decompiler/os/linux_x86_64
-cp <ghidra_opt> $OS/ghidra_opt_real
-cp /workspace/angr-ghidra-core/launcher/target/release/decompile $OS/decompile
-# 3. run the headless validation
-/workspace/angr-ghidra-core/scripts/run_ghidra_validation.sh
+./install.sh --ghidra /path/to/ghidra           # Linux / macOS
+install.bat  --ghidra C:\path\to\ghidra         # Windows
 ```
 
-## Quick start
+This obtains the launcher, backs up Ghidra's original decompiler, installs the
+launcher in its place, and writes the config next to it. **Restart Ghidra**
+afterwards.
+
+| Option | Meaning |
+|---|---|
+| `--ghidra DIR` | Ghidra installation; defaults to `$GHIDRA_INSTALL_DIR`, then a search of common locations |
+| `--python PATH` | an interpreter that already has angr/pypcode/cle |
+| `--venv DIR` | create a virtualenv there and `pip install` the dependencies |
+| `--server` | enable the faster shared-server mode |
+| `--launcher PATH` | use this prebuilt launcher binary |
+| `--build` | force a `cargo build` even when a prebuilt binary is present |
+
+The launcher comes from `--launcher`, else `prebuilt/<platform>/decompile` or
+`prebuilt/decompile` as shipped in a release, else a `cargo build` — so a release
+that bundles the binary installs with no compiler at all.
+
+### By hand
+
+Ghidra spawns `decompile` (`decompile.exe` on Windows) from
+`<ghidra>/Ghidra/Features/Decompiler/os/<platform>/`. Build the launcher and put
+it there, keeping the original alongside:
 
 ```bash
-# decompile a function with the real C++ core (validation oracle)
-PYTHONPATH=. python scripts/decompile.py /path/to/binary main
-
-# ...or with the angr-backed core
-PYTHONPATH=. python scripts/decompile.py /path/to/binary main --angr
-
-# drive the real core with full protocol tracing
-PYTHONPATH=. python scripts/drive_real_core.py /path/to/binary main --trace
+cargo build --release --manifest-path launcher/Cargo.toml
+# Windows cross-build: --target x86_64-pc-windows-gnu (or -msvc) -> decompile.exe
+OS=<ghidra>/Ghidra/Features/Decompiler/os/linux_x86_64
+mv "$OS/decompile" "$OS/decompile.orig"
+cp launcher/target/release/decompile "$OS/decompile"
 ```
 
-Example (fauxware `main`, angr core):
+Then write an `angr-decompile.conf` beside it — see Configuration.
 
-```c
-unsigned int main(unsigned int a0, unsigned long long a1)
-{
-    ...
-    v2 = 4195940();
-    return (!v2 ? (unsigned int)4196093() : (unsigned int)4196077());
-}
-```
-
-## Installing into a Ghidra tree
-
-### The easy way: the installer
-
-An installer handles everything — building the launcher, backing up Ghidra's
-original decompiler, dropping the launcher in, and writing the config:
+## Removal
 
 ```bash
-# Linux / macOS
-./install.sh --ghidra /path/to/ghidra
-
-# Windows
-install.bat --ghidra C:\path\to\ghidra
+./install.sh --ghidra /path/to/ghidra --uninstall
+install.bat  --ghidra C:\path\to\ghidra --uninstall
 ```
 
-If you don't already have a Python with `angr`, `pypcode` and `cle`, let the
-installer make one for you: add `--venv ~/angr-venv` (it creates the virtualenv
-and `pip install`s the dependencies). To point at an existing interpreter
-instead, use `--python /path/to/python`. Add `--server` to enable the faster
-shared-server mode. The install is reversible:
+This restores the backed-up original decompiler and removes the config. By hand:
+move `decompile.orig` back over `decompile` and delete `angr-decompile.conf`.
 
-```bash
-./install.sh --ghidra /path/to/ghidra --uninstall     # restores the original
-```
+## Configuration
 
-The installer autodetects the platform's `os/<platform>/` directory and, if
-`--ghidra` is omitted, falls back to `$GHIDRA_INSTALL_DIR` (then a search of
-common locations on Unix). **Restart Ghidra** afterwards.
-
-**Prebuilt launcher.** The installer uses a ready-made launcher binary when one
-is available, so a Rust toolchain is only needed as a last resort. It looks in
-order for: `--launcher PATH` (an explicit binary), then one shipped in the
-release under `prebuilt/<platform>/decompile` or `prebuilt/decompile`, and only
-then falls back to a `cargo build`. So a release tarball that bundles the
-prebuilt binary installs with no compiler at all. Pass `--build` to force a
-build even when a prebuilt binary is present.
-
-### The manual way
-
-Ghidra spawns an executable literally named `decompile` (`decompile.exe` on
-Windows) from `<ghidra>/Ghidra/Features/Decompiler/os/<platform>/`. The
-**`launcher/`** crate builds a small, zero-dependency native binary that stands in
-for it: it locates a Python interpreter and the angr core, then hands over the
-process's stdio transparently (a real `exec` on Unix; spawn-and-wait on Windows),
-so the Python core speaks the protocol to Ghidra directly. A native launcher —
-rather than a shell script — is what makes the same drop-in work on Windows.
-
-```bash
-cd launcher
-cargo build --release                       # -> target/release/decompile
-# Windows (from a Windows box, or Linux with a mingw/MSVC cross toolchain):
-#   cargo build --release --target x86_64-pc-windows-gnu    # -> decompile.exe
-#   cargo build --release --target x86_64-pc-windows-msvc
-cp target/release/decompile \
-   <ghidra>/Ghidra/Features/Decompiler/os/linux_x86_64/decompile
-```
-
-### Configuration
-
-Because Ghidra spawns the decompiler itself, setting environment variables for it
-is awkward (especially on Windows). The launcher instead reads a config file that
-sits **next to the binary** — `angr-decompile.conf` (or `decompile.conf`) in the
-same `os/<platform>/` directory. See `launcher/angr-decompile.conf.example`:
+Ghidra spawns the decompiler itself, so setting environment variables for it is
+awkward (especially on Windows). The launcher instead reads
+`angr-decompile.conf` (or `decompile.conf`) from **its own directory**:
 
 ```ini
 # angr-decompile.conf  (next to decompile / decompile.exe)
 python     = C:\path\to\angr-venv\Scripts\python.exe
 core       = C:\path\to\angr-ghidra-core\bin\angr-decompile
 pythonpath = C:\path\to\angr-ghidra-core      # makes angr_ghidra_core importable
-log        = C:\temp\angr-logs                # debug log (dir -> per-pid files)
-# log_io   = 1                                # also dump raw protocol bytes
-# fallback = ...\decompile.orig.exe           # restore the original C++ core
-# env.NAME = value                            # extra child env vars
+# server   = 1                                # shared long-lived angr process
+# log      = C:\temp\angr-logs                # debug log (dir -> per-pid files)
 ```
 
-| Config key | Env override | Meaning |
+| Key | Env override | Meaning |
 |---|---|---|
 | `python` | `ANGR_GHIDRA_PYTHON` | interpreter with angr/pypcode/cle (default: search `PATH`) |
-| `core` | `ANGR_GHIDRA_CORE` | angr core entry (default: `angr-decompile` next to the binary, else `python -m angr_ghidra_core.core.angr_core`) |
+| `core` | `ANGR_GHIDRA_CORE` | angr core entry (default: `angr-decompile` beside the binary, else `python -m angr_ghidra_core.core.angr_core`) |
 | `pythonpath` | `PYTHONPATH` (prepended) | import path for the core, so the package need not be installed |
-| `fallback` | `ANGR_GHIDRA_FALLBACK` | run this stock `decompile` binary instead (restore the C++ core) |
+| `server` | `ANGR_GHIDRA_SERVER` | use a shared long-lived angr server (much faster after the first decompile) |
+| `server_socket` | `ANGR_GHIDRA_SERVER_SOCKET` | where that server listens (default: a per-user path) |
+| `server_idle` | `ANGR_GHIDRA_SERVER_IDLE` | seconds of no connections before the server exits (default 600) |
+| `cfg_max_size` | `ANGR_GHIDRA_CFG_MAX_SIZE` | only build a whole-image CFG for images up to this size (default 512000) |
 | `log` | `ANGR_GHIDRA_LOG` | debug log; a **directory** yields per-pid files, a file is appended |
 | `log_io` | `ANGR_GHIDRA_LOG_IO` | also dump raw protocol bytes to `<log>.stdin.bin` / `.stdout.bin` |
+| `fallback` | `ANGR_GHIDRA_FALLBACK` | run this stock `decompile` binary **instead of** angr (an escape hatch; leave unset for normal use) |
 | `env.NAME` | — | set arbitrary environment variables on the child |
 
-An environment variable, if set, overrides the file. Relative paths in the config
-are resolved against the config file's directory. Values may be quoted.
+An environment variable, if set, overrides the file. Relative paths are resolved
+against the config file's directory. Values may be quoted.
 
 **Debugging a startup failure** (e.g. *"Unable to initialize decompiler
-interface; the pipe has ended"* — the core died during registration). Set `log`
-in the config (a directory is cleanest — Ghidra runs several decompiler processes
-at once, each getting its own file), reproduce, then read the log: it records the
-resolved interpreter/core/env and captures the child's stderr — the Python
-traceback (a `ModuleNotFoundError`, an `angr`/`pypcode` import error, a wrong core
-path, …) that Ghidra otherwise swallows. Add `log_io` to also see the raw
-protocol bytes and pinpoint how far registration got. Enabling the log switches
-the launcher to a spawn-and-wait model on all platforms (it still forwards stderr
-to Ghidra); normal operation uses a direct `exec` on Unix.
-
-## Status and roadmap
-
-Beyond stage 3 (text-level decompilation through the real protocol):
-
-- **[done] Symbol names for calls.** Call targets are resolved to names via a
-  `getCodeLabel` callback and registered as named, returning stubs in angr's KB,
-  so calls render as `puts()` / `authenticate()` etc. instead of raw addresses.
-- **[done] Local-variable symbols + token links.** The model function now carries
-  a real `<localdb>` `LocalSymbolMap`: one HighSymbol per angr variable with a
-  stable id, name, core datatype, and storage (stack special-space offset or a
-  register-space address resolved via `getRegister`). Variable tokens carry
-  `symref` links to those symbols. (The `<symbol>`/`<mapsym>`/`<addr>` encoding is
-  cross-validated: the real C++ core consumes the same shape from the oracle's
-  `getMappedSymbols` replies.)
-
-- **[done] HighVariables + per-occurrence identity.** The model function now
-  emits an `<ast>` with a representative varnode per variable and a `<highlist>`
-  of HighVariables (`HighLocal`/`HighParam`) linking each varnode (`repref`) to
-  its symbol (`symref`). Variable tokens carry `varref`, so every occurrence of a
-  variable resolves through the same varnode to the same HighVariable to the same
-  symbol — enabling highlight-all-occurrences and per-occurrence rename/retype.
-  The whole chain is now confirmed end-to-end against a running headless Ghidra
-  (see "Validated against real Ghidra" above).
-
-- **[done] Edit round-trip + types.** Variable renames/retypes committed in the
-  GUI round-trip: locked localdb symbols are matched by storage and applied to
-  angr's variables (rename → unified name; retype → manual type + re-decompile).
-  Stack varnodes are marked addr-tied so Ghidra stores edits as fixed `<addr>`
-  rather than DynamicHash. Ghidra datatypes ↔ `SimType` mapping.
-- **[done] P-code op graph.** The `<ast>` now carries a real p-code def-use graph
-  (`<block>`/`<op>`/`<blockedge>`) lowered from angr's AIL. Verified against real
-  Ghidra: the HighFunction has p-code ops and basic blocks, and forward/backward
-  slicing (`DecompilerUtils.getForwardSlice`) returns non-trivial slices. It's a
-  best-effort data-flow lowering (see `core/pcode.py`).
-- **[done] Listing ↔ decompiler navigation.** Each C token carries an `opref` to
-  the p-code op at its instruction, so both directions work through Ghidra's
-  standard machinery: `ClangToken.getMinAddress()` moves the listing cursor from
-  a clicked token, and `DecompilerUtils.getTokensFromView` highlights the tokens
-  for a selected instruction. Op seqnums are stamped with each expression's own
-  `ins_addr` so per-expression tokens find a matching op. Verified against real
-  headless Ghidra (`ghidra_validation/NavTest.java`, RESULT PASS); coverage is
-  bounded by angr's AIL being coarser than the machine listing.
-
-- **[done] Per-token varref.** Variable tokens now reference the varnode of the
-  exact SSA value they render (via `CVariable.vvar_id` → the op-graph varnode),
-  not one shared representative per variable — so def/use highlighting and
-  slices are per-occurrence-accurate. Each HighVariable lists all of its SSA
-  values as instances (disjoint across variables, even when storage is shared),
-  so every token still resolves token → varnode → HighVariable → HighSymbol.
-  This is the prerequisite for consuming DynamicHash-stored edits (SSA-local
-  renames), which Ghidra can now store against the right varnode.
-
-- **[done] DynamicHash edit consumption.** Edits on variables with no stable
-  storage address (SSA temporaries, non-addr-tied stack) are stored by Ghidra as
-  a 64-bit hash of the varnode's local def-use neighborhood and come back as
-  `<hash>` symbols. `core/dynahash.py` is a faithful port of Ghidra's
-  `DynamicHash` (CRC neighborhood hash, edge ordering, candidate gathering,
-  method cycling) over our op graph: the stored (address, hash) pair resolves to
-  the varnode, whose storage feeds the normal rename/retype path. Validated
-  end-to-end against real Ghidra: a hash computed by Ghidra's own `DynamicHash`
-  over our emitted graph, stored as a hash-storage DB local, round-trips into
-  the C output (`ghidra_validation/HashEditRoundTrip.java`).
-
-- **[done] Performance: warm server + whole-image CFG cache.** Instead of a
-  fresh Python+angr process per decompile, the native launcher starts a
-  long-lived **server** (`core/server_daemon.py`) once and proxies each Ghidra
-  `decompile` invocation to it over a local socket; the server shares one
-  whole-image CFG cache across all sessions and exits ~10 min after Ghidra
-  closes. For programs whose mapped code image is ≤ 500 KB, the core recovers
-  one `CFGFast` over the whole image (probed via `getBytes`, since Ghidra never
-  sends the file), content-addresses it, and persists it with **angrdb** keyed
-  by that hash — so a function is decompiled straight out of the cached CFG
-  instead of a per-call scoped load. A function is only served this way when its
-  angr-recovered extent matches Ghidra's function size (the "block range matches
-  Ghidra's" guard); otherwise it falls back to the scoped path, so a differing
-  CFG split never yields a wrong body. On `bomb` (14 functions) this is ~2×
-  faster per function after the first; with the warm server the first-decompile
-  CFG cost is paid once per binary across the whole Ghidra session. Enable it
-  with `server = 1` in `angr-decompile.conf`. Validated against real headless
-  Ghidra in server mode (failures=0; Nav/Slice/Edit/HashEdit all PASS).
-
-- **[done] Multi-architecture.** The core is no longer x86-only. It infers the
-  architecture by probing Ghidra's `getRegister` callback for landmark registers
-  (the normalized specs Ghidra sends carry no ABI register names, so a spec-text
-  fingerprint is unreliable); resolves the return register from either a named or
-  an offset-based compiler-spec pentry; detects call targets via VEX
-  (`Ijk_Call`) rather than an x86 `call` mnemonic; and retries without the
-  data-reading peephole optimizations when a code-only image can't satisfy a
-  MIPS `gp` / PC-relative / constant load. Validated against real headless
-  Ghidra (`failures=0`) on **x86-64, i386, ARM (armel), AArch64, MIPS32 (BE and
-  LE), and PPC32** — covering both endiannesses, 32/64-bit, and four ISA
-  families. See `tests/test_multiarch.py`. Not yet supported: PPC64 ELFv1 (the
-  symbol points at a function descriptor, not code).
-- **[done] ARM Thumb.** Ghidra addresses a Thumb function at its even base and
-  doesn't expose the T-mode context register to the decompiler, so the mode is
-  detected by probing `getPcode` at the entry: any 2-byte instruction means
-  Thumb. angr then recovers and decompiles the function at `base | 1` (its
-  set-low-bit Thumb convention). ARM-32 resolves to `ArchARMHF`, which lifts
-  both soft- and hard-float integer code without the spurious flag `ccall`s that
-  `ArchARMEL` emits on Thumb. Validated against real headless Ghidra: armhf
-  `fauxware` decompiles to clean C with resolved `puts`/`read`/`authenticate`
-  calls and no undecoded instructions — where it previously produced confident
-  garbage that still reported `failures=0`. `ValidateAngrCore` now also asserts
-  the output contains no undecoded instructions, so a clean run means something.
-
-Remaining, in planned order:
-
-1. **True LOAD/STORE lowering.** Memory def-use is currently approximated by
-   COPY (no space-id inputs); real LOAD/STORE ops would deepen slices further.
-2. **Coverage + hybrid routing.** `normalize`/`paramid` styles, `generateSignatures`
-   and `structureGraph` routed to the C++ core; option plumbing; performance.
-3. **Scale validation** against the C++ core across a large corpus.
-4. **Multi-architecture** beyond x86-64.
-
-## Layout
-
-```
-angr_ghidra_core/
-  ghidra_wire/   protocol: packed encoding, framing, client, server, ids, dump, clang
-  harness/       PypcodeOracle, DecompSession (drive either core from a binary)
-  core/          angr-backed core: spec parsing, response emission, main loop
-bin/
-  angr-decompile   the angr core entry point (python)
-launcher/          zero-dep Rust crate -> native `decompile`/`decompile.exe`
-ghidra_validation/ headless GhidraScript validating the decode contract
-scripts/           gen_id_tables.py, decompile.py, drive_real_core.py,
-                   run_ghidra_validation.sh
-tests/             packed unit tests + real-core and angr-core integration tests
-```
-
-## Requirements
-
-The `/workspace/angr-venv` virtualenv with editable `angr` (and its `rustylib`
-native extension built), `pypcode`, and `cle`. The real-core tests additionally
-need `ghidra_opt` built under
-`Ghidra/Features/Decompiler/src/decompile/cpp/` (`make ghidra_opt`).
+interface; the pipe has ended"* — the core died during registration): set `log`
+to a directory (Ghidra runs several decompiler processes at once, each getting
+its own file), reproduce, then read the log. It records the resolved
+interpreter/core/env and captures the child's stderr — the Python traceback that
+Ghidra otherwise swallows. Add `log_io` to see the raw protocol bytes and
+pinpoint how far registration got.
