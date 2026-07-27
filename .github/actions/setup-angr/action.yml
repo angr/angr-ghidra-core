@@ -32,6 +32,8 @@ runs:
         pip install "$src/claripy"
         pip install "$src/cle"
         # angr's build pins pyvex==9.3.0.dev0 (not on PyPI), so build against the
-        # versions just installed rather than an isolated environment.
-        pip install --no-build-isolation "$src/angr"
+        # versions just installed rather than an isolated environment. The
+        # 'angrdb' extra (SQLAlchemy) is what lets the whole-image CFG cache
+        # persist to disk; without it that path is skipped and untested.
+        pip install --no-build-isolation "$src/angr[angrdb]"
         pip install pypcode==4.0.0
