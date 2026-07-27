@@ -1,5 +1,7 @@
 # angr-ghidra-core
 
+[![CI](https://github.com/angr/angr-ghidra-core/actions/workflows/ci.yml/badge.svg)](https://github.com/angr/angr-ghidra-core/actions/workflows/ci.yml)
+
 Replaces Ghidra's C++ decompiler with the **angr decompiler**, without modifying
 Ghidra itself.
 

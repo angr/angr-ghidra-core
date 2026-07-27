@@ -7,7 +7,9 @@ import pytest
 
 from angr_ghidra_core.harness.session import ANGR_CORE, REAL_CORE, DecompSession
 
-FAUXWARE = "/workspace/binaries/tests/x86_64/fauxware"
+from tests.paths import binary
+
+FAUXWARE = binary("x86_64/fauxware")
 
 pytestmark = pytest.mark.skipif(
     not (os.path.exists(REAL_CORE) and os.path.exists(FAUXWARE)),

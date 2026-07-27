@@ -4,14 +4,29 @@ from a binary via PypcodeOracle, and decompile functions by name/address.
 
 from __future__ import annotations
 
+import os
+import sys
+
 from ..ghidra_wire import PackedEncoder, ids
 from ..ghidra_wire.clang import render_c, split_decompile_response
 from ..ghidra_wire.client import DecompClient
 from ..ghidra_wire.dump import parse_tree
 from .oracle import SPACE_RAM, PypcodeOracle
 
-REAL_CORE = "/workspace/ghidra/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_opt"
-ANGR_CORE = ["/workspace/angr-venv/bin/python", "/workspace/angr-ghidra-core/bin/angr-decompile"]
+# The angr core is this repo's own entry point, run with the interpreter that is
+# running the tests -- so it works in any environment (CI, a fresh checkout),
+# not just the /workspace dev tree. Both are overridable by env var.
+_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ANGR_CORE = [
+    os.environ.get("ANGR_GHIDRA_TEST_PYTHON", sys.executable),
+    os.environ.get("ANGR_GHIDRA_TEST_CORE", os.path.join(_REPO, "bin", "angr-decompile")),
+]
+# The real C++ core is the cross-check oracle; tests using it skip when it's
+# absent (it's only built in the full dev tree).
+REAL_CORE = os.environ.get(
+    "ANGR_GHIDRA_TEST_REAL_CORE",
+    "/workspace/ghidra/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_opt",
+)
 
 
 class DecompSession:

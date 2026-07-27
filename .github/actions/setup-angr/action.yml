@@ -1,0 +1,42 @@
+name: Set up the angr stack
+description: >
+  Build and install the exact angr stack this project targets (angr master,
+  version-locked at 9.3.0.dev0) from pinned commits, with its C (pyvex/VEX via
+  CMake) and Rust (angr rustylib via setuptools-rust) extensions, plus pypcode.
+
+runs:
+  using: composite
+  steps:
+    # pyvex builds VEX through CMake. The macOS and Windows runner images ship
+    # CMake and a toolchain already; Linux needs them installed.
+    - name: System build dependencies (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+
+    - name: Install the angr stack
+      shell: bash
+      run: |
+        set -eux
+        python -m pip install --upgrade pip setuptools setuptools-rust wheel cffi scikit-build-core
+        src="$RUNNER_TEMP/angr-src"
+        get() {  # $1 repo  $2 commit  (submodules: pyvex vendors VEX)
+          git clone --recurse-submodules "https://github.com/angr/$1.git" "$src/$1"
+          git -C "$src/$1" checkout "$2"
+          git -C "$src/$1" submodule update --init --recursive
+        }
+        get archinfo 9462a9cfc9a8c8c1648e8d62e9773065e660d23c
+        get pyvex    121759e98ff88ab9335266d323ae5cae149167c9
+        get claripy  3ebec4f14a4b9e419acadd0bd374262307569cdc
+        get cle      421cd616aa83f349d928c060107bbddfbccb4356
+        get angr     656890235fbd19c029da765db5f0a36dce81934b
+        pip install "$src/archinfo"
+        pip install "$src/pyvex"
+        pip install "$src/claripy"
+        pip install "$src/cle"
+        # angr's build pins pyvex==9.3.0.dev0 (not on PyPI), so build against the
+        # versions just installed rather than an isolated environment. The
+        # 'angrdb' extra (SQLAlchemy) is what lets the whole-image CFG cache
+        # persist to disk; without it that path is skipped and untested.
+        pip install --no-build-isolation "$src/angr[angrdb]"
+        pip install pypcode==4.0.0

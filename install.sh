@@ -201,12 +201,16 @@ ok "installed launcher -> $TARGET"
     echo "python     = $PYTHON"
     echo "core       = $CORE"
     echo "pythonpath = $REPO"
-    [ -f "$BACKUP" ] && echo "fallback   = $BACKUP"
     if [ "$SERVER" -eq 1 ]; then
         echo "server     = 1"
     else
         echo "# server   = 1   # uncomment for the faster shared-server mode"
     fi
+    # NB: 'fallback' must stay commented out. The launcher runs it *instead of*
+    # the angr core, so setting it here would silently disable this whole
+    # install. It is an escape hatch for temporarily getting the stock
+    # decompiler back without uninstalling (--uninstall is the real revert).
+    [ -f "$BACKUP" ] && echo "# fallback = $BACKUP   # uncomment to run the stock decompiler instead"
 } > "$CONF"
 ok "wrote config -> $CONF"
 

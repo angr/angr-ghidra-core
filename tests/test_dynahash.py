@@ -5,7 +5,9 @@ import os
 
 import pytest
 
-FAUXWARE = "/workspace/binaries/tests/x86_64/fauxware"
+from tests.paths import binary
+
+FAUXWARE = binary("x86_64/fauxware")
 
 pytestmark = pytest.mark.skipif(
     not os.path.exists(FAUXWARE), reason="test binary not available")

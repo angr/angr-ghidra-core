@@ -29,11 +29,30 @@ import logging
 import os
 import tempfile
 import threading
+from functools import lru_cache
 
 log = logging.getLogger("angr_ghidra_core")
 
 PAGE = 0x1000
 DEFAULT_MAX_SIZE = 500 * 1024
+
+
+@lru_cache(maxsize=1)
+def angrdb_class():
+    """angr's `AngrDB`, or None when it isn't importable.
+
+    Persisting the CFG needs SQLAlchemy, which angr only pulls in via its
+    optional `angrdb` extra (`pip install angr[angrdb]`). Without it we still
+    build and memoize the whole-image CFG in-process -- only the on-disk cache,
+    which would carry it across restarts, is skipped. Losing the whole fast path
+    over a missing optional dependency would be a much worse trade."""
+    try:
+        from angr.angrdb import AngrDB
+        return AngrDB
+    except Exception as e:
+        log.warning("angrdb unavailable (%s); the whole-image CFG cache will not "
+                    "persist across restarts. Install angr[angrdb] to enable it.", e)
+        return None
 
 
 def _default_cache_dir() -> str:
@@ -132,10 +151,10 @@ class ImageCache:
         return os.path.join(self._dir, f"{h}.adb")
 
     def _load_or_build(self, h: str, base: int, content: bytes, angr_arch):
-        from angr.angrdb import AngrDB
+        AngrDB = angrdb_class()
 
         adb = self._adb_path(h)
-        if os.path.exists(adb):
+        if AngrDB is not None and os.path.exists(adb):
             try:
                 proj = AngrDB().load(adb)
                 model = proj.kb.cfgs.get_most_accurate()
@@ -148,9 +167,10 @@ class ImageCache:
         os.makedirs(self._dir, exist_ok=True)
         proj, model, img_path = self._build(base, content, angr_arch)
         try:
-            # angrdb re-reads the blob's backing file during dump, so it must
-            # still exist here; the persisted db is self-contained afterwards
-            AngrDB(proj).dump(adb)
+            if AngrDB is not None:
+                # angrdb re-reads the blob's backing file during dump, so it must
+                # still exist here; the persisted db is self-contained afterwards
+                AngrDB(proj).dump(adb)
         except Exception:
             log.exception("angrdb dump failed for %s (in-memory cache still used)", h[:12])
         finally:

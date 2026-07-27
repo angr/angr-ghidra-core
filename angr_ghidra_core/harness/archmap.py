@@ -16,9 +16,44 @@ from __future__ import annotations
 import glob
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from xml.etree import ElementTree as ET
 
 GHIDRA_ROOT = "/workspace/ghidra"
+
+
+@lru_cache(maxsize=1)
+def language_dir_globs() -> tuple[str, ...]:
+    """Glob patterns for directories holding Ghidra's processor definitions
+    (`*.ldefs`, `*.pspec`, `*.cspec`).
+
+    A real Ghidra installation is preferred ($ANGR_GHIDRA_ROOT, then
+    $GHIDRA_INSTALL_DIR, then the dev tree). Failing that we fall back to the
+    copy of Ghidra's processor data that **pypcode** bundles -- pypcode embeds
+    the same SLEIGH definitions (the files are byte-identical), so the harness
+    works anywhere pypcode is installed, including CI with no Ghidra."""
+    pats: list[str] = []
+    for root in (os.environ.get("ANGR_GHIDRA_ROOT"),
+                 os.environ.get("GHIDRA_INSTALL_DIR"),
+                 GHIDRA_ROOT):
+        if root and os.path.isdir(os.path.join(root, "Ghidra", "Processors")):
+            pats.append(os.path.join(root, "Ghidra/Processors/*/data/languages"))
+    try:
+        import pypcode
+        bundled = os.path.join(os.path.dirname(pypcode.__file__), "processors")
+        if os.path.isdir(bundled):
+            pats.append(os.path.join(bundled, "*/data/languages"))
+    except Exception:
+        pass
+    return tuple(pats)
+
+
+def find_language_files(pattern: str) -> list[str]:
+    """All files matching `pattern` (e.g. "*.ldefs") across the language dirs."""
+    out: list[str] = []
+    for d in language_dir_globs():
+        out.extend(glob.glob(os.path.join(d, pattern)))
+    return out
 
 # CLE arch name -> (Ghidra processor prefix, language variant). Endianness and
 # bit width come from the loaded object, so a single entry covers BE/LE variants.
@@ -69,7 +104,7 @@ def spec_for_arch(arch) -> ArchSpec | None:
 
 
 def _resolve_ldefs(langid: str) -> tuple[str, str] | None:
-    for ldef in glob.glob(f"{GHIDRA_ROOT}/Ghidra/Processors/*/data/languages/*.ldefs"):
+    for ldef in find_language_files("*.ldefs"):
         try:
             root = ET.parse(ldef).getroot()
         except ET.ParseError:

@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Latest public Ghidra release. The protocol element/attribute ids this project
+  # uses are identical in 12.1.2 and the 12.2 dev tree it was generated from
+  # (only unused ids differ), so a stock release is a valid integration target.
+  GHIDRA_VERSION: "12.1.2"
+  GHIDRA_ZIP: "ghidra_12.1.2_PUBLIC_20260605.zip"
+  GHIDRA_TAG: "Ghidra_12.1.2_build"
+
+jobs:
+  # Wire-protocol unit tests. These import only angr_ghidra_core.ghidra_wire,
+  # which has no angr dependency, so this job is fast and always meaningful --
+  # it gates the packed-encoding / framing layer with nothing but pytest.
+  protocol:
+    name: Protocol tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip pytest
+      - run: PYTHONPATH=. pytest -q tests/test_packed.py
+
+  # The native launcher must compile.
+  launcher:
+    name: Launcher build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --manifest-path launcher/Cargo.toml
+
+  # The full Python suite, driven through the protocol harness (a PypcodeOracle
+  # standing in for Ghidra). Needs the angr stack and the test-binaries corpus.
+  # No Ghidra install: the harness reads the SLEIGH processor specs it needs from
+  # pypcode's bundled copy of Ghidra's processor data. Expect ~8 skips -- the
+  # tests that cross-check against the real C++ core, which isn't built here.
+  full-suite:
+    name: Full test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-angr
+      - run: pip install pytest pytest-xdist
+      - name: Fetch the test-binaries corpus
+        run: git clone --depth 1 https://github.com/angr/binaries.git "$RUNNER_TEMP/binaries"
+      - name: Run the suite
+        env:
+          ANGR_GHIDRA_TEST_BINARIES: ${{ runner.temp }}/binaries/tests
+        run: PYTHONPATH=. pytest -q -n auto
+
+  # The integration test that matters most: drive the core from a REAL Ghidra.
+  # The harness oracle is an approximation of Ghidra, and real Ghidra has
+  # repeatedly caught what it missed (attribute signedness, normalized
+  # offset-based compiler specs, Thumb decoded as ARM). This installs the
+  # launcher into a stock Ghidra release with ./install.sh and decompiles
+  # through analyzeHeadless, asserting Ghidra's own Java decoders accept the
+  # response (failures=0) across several architectures.
+  ghidra:
+    name: Real Ghidra integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash          # Git Bash on the Windows runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"   # Ghidra 12.1.2: application.java.min=21
+      - uses: ./.github/actions/setup-angr
+
+      - name: Cache the Ghidra release
+        id: ghidra-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ghidra.zip
+          key: ghidra-${{ env.GHIDRA_ZIP }}
+      - name: Download Ghidra
+        if: steps.ghidra-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSL -o "$RUNNER_TEMP/ghidra.zip" \
+            "https://github.com/NationalSecurityAgency/ghidra/releases/download/${GHIDRA_TAG}/${GHIDRA_ZIP}"
+      # The release zip is platform-independent (Ghidra is Java) and ships the
+      # native decompiler for every platform under os/<platform>/, so the same
+      # download works on all three runners.
+      - name: Unpack Ghidra
+        run: |
+          unzip -q "$RUNNER_TEMP/ghidra.zip" -d "$RUNNER_TEMP"
+          echo "GHIDRA_DIST=$(find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'ghidra_*_PUBLIC')" >> "$GITHUB_ENV"
+
+      - name: Install the angr decompiler into Ghidra (Unix)
+        if: runner.os != 'Windows'
+        run: ./install.sh --ghidra "$GHIDRA_DIST" --python "$(which python)"
+      - name: Install the angr decompiler into Ghidra (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: install.bat --ghidra "%GHIDRA_DIST%" --python "%pythonLocation%\python.exe"
+
+      - name: Fetch the test-binaries corpus
+        run: git clone --depth 1 https://github.com/angr/binaries.git "$RUNNER_TEMP/binaries"
+
+      - name: Decompile through real Ghidra (multiple architectures)
+        env:
+          ANGR_GHIDRA_TEST_BINARIES: ${{ runner.temp }}/binaries/tests
+        run: |
+          set -e
+          for arch in x86_64 i386 armel armhf mips ppc; do
+            echo "::group::$arch"
+            scripts/run_ghidra_validation.sh \
+              "$RUNNER_TEMP/binaries/tests/$arch/fauxware" main
+            echo "::endgroup::"
+          done

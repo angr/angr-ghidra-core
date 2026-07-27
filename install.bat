@@ -156,14 +156,18 @@ rem So the conditional lines are guarded with goto, not an inline if.
 >> "%CONF%" echo python     = %PYTHON%
 >> "%CONF%" echo core       = %CORE%
 >> "%CONF%" echo pythonpath = %REPO%
-if not exist "%BACKUP%" goto cfg_server
->> "%CONF%" echo fallback   = %BACKUP%
-:cfg_server
 if "%SERVER%"=="1" goto cfg_server_on
 >> "%CONF%" echo # server   = 1   uncomment for the faster shared-server mode
-goto cfg_done
+goto cfg_fallback
 :cfg_server_on
 >> "%CONF%" echo server     = 1
+:cfg_fallback
+rem 'fallback' must stay commented out: the launcher runs it *instead of* the
+rem angr core, so setting it here would silently disable this whole install.
+rem It is an escape hatch for temporarily getting the stock decompiler back
+rem without uninstalling (--uninstall is the real revert).
+if not exist "%BACKUP%" goto cfg_done
+>> "%CONF%" echo # fallback = %BACKUP%   uncomment to run the stock decompiler instead
 :cfg_done
 echo   ok wrote config -^> %CONF%
 

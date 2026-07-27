@@ -17,7 +17,9 @@ from angr_ghidra_core.harness.session import ANGR_CORE, DecompSession
 from angr_ghidra_core.ghidra_wire.packed import PackedEncoder
 from angr_ghidra_core.ghidra_wire.clang import render_c, split_decompile_response
 
-FAUXWARE = "/workspace/binaries/tests/x86_64/fauxware"
+from tests.paths import binary
+
+FAUXWARE = binary("x86_64/fauxware")
 SPACE_RAM = 4
 
 pytestmark = pytest.mark.skipif(
@@ -110,7 +112,7 @@ def test_server_output_matches_stdio_core(server):
     assert server_c == stdio_c
 
 
-BOMB = "/workspace/binaries/tests/x86_64/bomb"
+BOMB = binary("x86_64/bomb")
 
 
 @pytest.mark.skipif(not os.path.exists(BOMB), reason="bomb binary not available")

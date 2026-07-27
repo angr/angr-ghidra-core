@@ -12,7 +12,7 @@ import pytest
 
 from angr_ghidra_core.harness.session import ANGR_CORE, DecompSession
 
-BINROOT = "/workspace/binaries/tests"
+from tests.paths import BINROOT
 
 # (arch dir, binary, function, expect_named_calls, expect_fully_lifted)
 # expect_fully_lifted=False tolerates the odd instruction angr's lifter can't

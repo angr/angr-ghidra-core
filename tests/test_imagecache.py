@@ -12,7 +12,9 @@ from angr_ghidra_core.core.imagecache import (
     probe_image,
 )
 
-FAUXWARE = "/workspace/binaries/tests/x86_64/fauxware"
+from tests.paths import binary
+
+FAUXWARE = binary("x86_64/fauxware")
 
 pytestmark = pytest.mark.skipif(
     not os.path.exists(FAUXWARE), reason="test binary not available")
@@ -93,10 +95,17 @@ def test_build_reload_decompiles(tmp_path):
     got2 = cache.get(base + 0x600, _pages(mapping), "AMD64")
     assert got2[0] is proj
 
+    # Persistence needs angr's optional 'angrdb' extra (SQLAlchemy). Without it
+    # the in-memory cache above still works, which is the point of the fallback,
+    # so only the on-disk half of the test is conditional.
+    from angr_ghidra_core.core.imagecache import angrdb_class
+    AngrDB = angrdb_class()
+    if AngrDB is None:
+        pytest.skip("angrdb unavailable (pip install angr[angrdb])")
+
     # the angrdb file was written and reloads into a decompilable project
     adbs = list(tmp_path.glob("*.adb"))
     assert adbs, "expected an angrdb cache file"
-    from angr.angrdb import AngrDB
     proj2 = AngrDB().load(str(adbs[0]))
     fn = max(proj2.kb.functions.values(), key=lambda f: f.size)
     dec = proj2.analyses.Decompiler(fn, cfg=proj2.kb.cfgs.get_most_accurate())
