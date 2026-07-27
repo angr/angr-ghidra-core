@@ -72,8 +72,15 @@ jobs:
   # through analyzeHeadless, asserting Ghidra's own Java decoders accept the
   # response (failures=0) across several architectures.
   ghidra:
-    name: Real Ghidra integration
-    runs-on: ubuntu-latest
+    name: Real Ghidra integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash          # Git Bash on the Windows runner
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -97,13 +104,21 @@ jobs:
         run: |
           curl -sSL -o "$RUNNER_TEMP/ghidra.zip" \
             "https://github.com/NationalSecurityAgency/ghidra/releases/download/${GHIDRA_TAG}/${GHIDRA_ZIP}"
+      # The release zip is platform-independent (Ghidra is Java) and ships the
+      # native decompiler for every platform under os/<platform>/, so the same
+      # download works on all three runners.
       - name: Unpack Ghidra
         run: |
           unzip -q "$RUNNER_TEMP/ghidra.zip" -d "$RUNNER_TEMP"
           echo "GHIDRA_DIST=$(find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'ghidra_*_PUBLIC')" >> "$GITHUB_ENV"
 
-      - name: Install the angr decompiler into Ghidra
+      - name: Install the angr decompiler into Ghidra (Unix)
+        if: runner.os != 'Windows'
         run: ./install.sh --ghidra "$GHIDRA_DIST" --python "$(which python)"
+      - name: Install the angr decompiler into Ghidra (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: install.bat --ghidra "%GHIDRA_DIST%" --python "%pythonLocation%\python.exe"
 
       - name: Fetch the test-binaries corpus
         run: git clone --depth 1 https://github.com/angr/binaries.git "$RUNNER_TEMP/binaries"

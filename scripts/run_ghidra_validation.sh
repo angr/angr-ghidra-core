@@ -23,7 +23,13 @@ elif [ -d /workspace/jdk ]; then
     export JAVA_HOME=/workspace/jdk PATH="/workspace/jdk/bin:$PATH"
 fi
 
-[ -x "$GHIDRA_DIST/support/analyzeHeadless" ] || {
+# Ghidra ships a shell launcher and a .bat; on Windows (Git Bash / MSYS) only
+# the .bat runs.
+HEADLESS="$GHIDRA_DIST/support/analyzeHeadless"
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) HEADLESS="$GHIDRA_DIST/support/analyzeHeadless.bat" ;;
+esac
+[ -f "$HEADLESS" ] || {
     echo "error: no Ghidra at '$GHIDRA_DIST' (set \$GHIDRA_DIST)" >&2; exit 1; }
 [ -f "$BIN" ] || { echo "error: no test binary at '$BIN'" >&2; exit 1; }
 
@@ -31,7 +37,7 @@ PROJ="$(mktemp -d)"
 trap 'rm -rf "$PROJ"' EXIT
 
 OUT="$PROJ/headless.log"
-"$GHIDRA_DIST/support/analyzeHeadless" "$PROJ" tmpproj \
+"$HEADLESS" "$PROJ" tmpproj \
     -import "$BIN" \
     -scriptPath "$HERE/ghidra_validation" \
     -postScript ValidateAngrCore.java "$FUNC" \
